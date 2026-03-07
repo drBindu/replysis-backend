@@ -1,0 +1,104 @@
+package com.coopilotxai.backend.controller;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import com.coopilotxai.backend.service.ResumeTailorService;
+import com.coopilotxai.backend.model.UserResume;
+import com.coopilotxai.backend.repository.UserResumeRepository;
+
+import java.util.Map;
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/v1/resume")
+/**
+ * UPDATED CORS:
+ * We now explicitly allow your Render frontend URL and local localhost.
+ */
+@CrossOrigin(
+    origins = {
+        "https://ai-powered-developer-assistance-platform.onrender.com", 
+        "http://localhost:3000"
+    }, 
+    allowedHeaders = "*", 
+    methods = {RequestMethod.POST, RequestMethod.GET, RequestMethod.OPTIONS}
+)
+public class ResumeController {
+
+    @Autowired
+    private ResumeTailorService tailorService;
+
+    @Autowired
+    private UserResumeRepository resumeRepository;
+
+    /**
+     * 1. AI TAILORING ENDPOINT
+     * Takes a Job Description and Master Resume, returns tailored text via Groq AI.
+     */
+    @PostMapping("/tailor")
+    public ResponseEntity<?> tailorResume(@RequestBody Map<String, Object> payload) {
+        try {
+            System.out.println("=== AI TAILORING REQUEST RECEIVED ===");
+            
+            String jd = (String) payload.get("jd");
+            Map<String, Object> masterResume = (Map<String, Object>) payload.get("masterResume");
+
+            if (jd == null || jd.isEmpty()) {
+                return ResponseEntity.badRequest().body("Job description is required.");
+            }
+
+            // Call Groq AI Service
+            String tailoredJson = tailorService.generateTailoredMatter(masterResume, jd);
+
+            System.out.println("AI Tailoring Successful!");
+            return ResponseEntity.ok(tailoredJson);
+
+        } catch (Exception e) {
+            System.err.println("AI ERROR: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("AI Error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 2. SAVE RESUME ENDPOINT
+     * Saves or Updates the user's manual edits into PostgreSQL.
+     */
+    @PostMapping("/save")
+    public ResponseEntity<?> saveResume(@RequestBody UserResume resume) {
+        try {
+            System.out.println("=== SAVING RESUME TO POSTGRESQL ===");
+            
+            // JpaRepository.save handles both Create (new) and Update (if ID exists)
+            UserResume savedResume = resumeRepository.save(resume);
+            
+            System.out.println("Resume saved successfully for: " + savedResume.getFullName());
+            return ResponseEntity.ok(savedResume);
+        } catch (Exception e) {
+            System.err.println("SAVE ERROR: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Database Error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 3. LOAD RESUME ENDPOINT
+     * Retrieves the saved resume data from PostgreSQL by ID.
+     */
+    @GetMapping("/load/{id}")
+    public ResponseEntity<?> loadResume(@PathVariable Long id) {
+        try {
+            System.out.println("=== LOADING RESUME ID: " + id + " ===");
+            Optional<UserResume> resume = resumeRepository.findById(id);
+            
+            if (resume.isPresent()) {
+                return ResponseEntity.ok(resume.get());
+            } else {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Resume not found.");
+            }
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Load Error: " + e.getMessage());
+        }
+    }
+}
