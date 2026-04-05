@@ -1,7 +1,10 @@
 package com.coopilotxai.backend.controller;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,6 +14,10 @@ import com.coopilotxai.backend.model.UserResume;
 import com.coopilotxai.backend.repository.UserResumeRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,6 +29,9 @@ public class ResumeController {
     @Autowired private ResumeTailorService   tailorService;
     @Autowired private ResumeAnalysisService analysisService;
     @Autowired private UserResumeRepository  resumeRepository;
+
+    @Value("${pdf.service.url:http://localhost:3001}")
+    private String pdfServiceUrl;
 
     // ─── 0. Health Check ───────────────────────────────────────────────────────
     @GetMapping("/status")
@@ -37,7 +47,6 @@ public class ResumeController {
             String jd = (String) payload.get("jd");
             Map<String, Object> resume = (Map<String, Object>) payload.get("resume");
 
-            // ── FIX: removed 50-char minimum — just check it's not empty ──
             if (jd == null || jd.trim().isEmpty())
                 return ResponseEntity.badRequest().body(Map.of("error", "Please enter a job description or keywords."));
             if (resume == null)
@@ -63,20 +72,16 @@ public class ResumeController {
                     ? (List<String>) payload.get("sectionsToEnhance")
                     : List.of("summary", "skills", "experience", "projects");
 
-            // ── FIX: read provider from request body, default to "groq" ──
             String provider = payload.containsKey("provider")
                     ? (String) payload.get("provider") : "groq";
 
             System.out.println("Provider selected: " + provider);
 
-            // ── FIX: removed 50-char minimum — just check it's not empty ──
             if (jd == null || jd.trim().isEmpty())
-                return ResponseEntity.badRequest().body(Map.of("error",
-                        "Please enter a job description or keywords."));
+                return ResponseEntity.badRequest().body(Map.of("error", "Please enter a job description or keywords."));
             if (masterResume == null)
                 return ResponseEntity.badRequest().body(Map.of("error", "Resume data is missing."));
 
-            // ── FIX: pass provider to the service ──
             String tailoredJsonString = tailorService.generateTailoredMatter(
                     masterResume, jd, selectedSkills, sectionsToEnhance, provider);
 
@@ -114,6 +119,96 @@ public class ResumeController {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Resume not found."));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Load Error: " + e.getMessage()));
+        }
+    }
+
+    // ─── 5. Export PDF ─────────────────────────────────────────────────────────
+    @PostMapping("/export-pdf")
+    public ResponseEntity<?> exportPdf(@RequestBody Map<String, Object> payload) {
+        try {
+            System.out.println("=== EXPORT PDF ===");
+            String html      = (String) payload.get("html");
+            String paperSize = (String) payload.getOrDefault("paperSize", "a4");
+
+            if (html == null || html.trim().isEmpty())
+                return ResponseEntity.badRequest().body(Map.of("error", "HTML content is required."));
+
+            ObjectMapper mapper = new ObjectMapper();
+            String body = mapper.writeValueAsString(Map.of("html", html, "paperSize", paperSize));
+
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(30))
+                    .build();
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(pdfServiceUrl + "/generate-pdf"))
+                    .header("Content-Type", "application/json")
+                    .timeout(java.time.Duration.ofSeconds(60))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+
+            HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+            if (response.statusCode() != 200) {
+                System.err.println("PDF service error: " + new String(response.body()));
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of("error", "PDF service error"));
+            }
+
+            System.out.println("PDF generated successfully, size: " + response.body().length + " bytes");
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=resume.pdf")
+                    .contentType(MediaType.APPLICATION_PDF)
+                    .body(response.body());
+
+        } catch (Exception e) {
+            System.err.println("PDF export error: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "PDF export failed: " + e.getMessage()));
+        }
+    }
+
+    // ─── 6. Export Word ────────────────────────────────────────────────────────
+    @PostMapping("/export-word")
+    public ResponseEntity<?> exportWord(@RequestBody Map<String, Object> payload) {
+        try {
+            System.out.println("=== EXPORT WORD ===");
+
+            ObjectMapper mapper = new ObjectMapper();
+            String body = mapper.writeValueAsString(payload);
+
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(30))
+                    .build();
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(pdfServiceUrl + "/generate-word"))
+                    .header("Content-Type", "application/json")
+                    .timeout(java.time.Duration.ofSeconds(60))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+
+            HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+            if (response.statusCode() != 200) {
+                System.err.println("Word service error: " + new String(response.body()));
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of("error", "Word service error"));
+            }
+
+            System.out.println("Word doc generated successfully, size: " + response.body().length + " bytes");
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=resume.docx")
+                    .contentType(MediaType.parseMediaType(
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                    .body(response.body());
+
+        } catch (Exception e) {
+            System.err.println("Word export error: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Word export failed: " + e.getMessage()));
         }
     }
 }
