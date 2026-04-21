@@ -52,7 +52,7 @@ public class ResumeAnalysisService {
     private String callGroq(String sys, String user) {
         RestTemplate rt = new RestTemplate();
         Map<String, Object> body = new HashMap<>();
-        body.put("model", "groq/compound-mini");
+        body.put("model", "llama-3.1-8b-instant");
         body.put("temperature", 0.1);
         body.put("max_tokens", 2000);
         body.put("messages", List.of(Map.of("role","system","content",sys), Map.of("role","user","content",user)));
