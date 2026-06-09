@@ -11,6 +11,9 @@ public class UserResume {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // Firebase UID of the owner — set server-side on save, enforced on load
+    private String userId;
+
     private String fullName;
     private String headline;
     private String email;

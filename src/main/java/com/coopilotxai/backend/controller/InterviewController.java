@@ -1,6 +1,5 @@
 package com.coopilotxai.backend.controller;
 
-import com.coopilotxai.backend.security.FirebaseAuthFilter;
 import com.coopilotxai.backend.security.FirebaseAuthService;
 import com.coopilotxai.backend.security.AuthUser;
 import com.coopilotxai.backend.service.FirestoreCreditsService;
@@ -27,7 +26,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/interview")
-@CrossOrigin(origins = "*")
 public class InterviewController {
 
     @Autowired

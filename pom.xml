@@ -69,6 +69,13 @@
       <version>3.0.3</version>
     </dependency>
 
+    <!-- Jsoup for HTML sanitization (PDF export security) -->
+    <dependency>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
+      <version>1.18.3</version>
+    </dependency>
+
     <!-- Test -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

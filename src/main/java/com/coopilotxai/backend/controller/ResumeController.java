@@ -8,11 +8,17 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import com.coopilotxai.backend.security.FirebaseAuthService;
+import com.coopilotxai.backend.security.AuthUser;
 import com.coopilotxai.backend.service.ResumeAnalysisService;
 import com.coopilotxai.backend.service.ResumeTailorService;
 import com.coopilotxai.backend.model.UserResume;
 import com.coopilotxai.backend.repository.UserResumeRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.firebase.auth.FirebaseToken;
+
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -26,14 +32,15 @@ import java.util.Optional;
 @RequestMapping("/api/v1/resume")
 public class ResumeController {
 
+    @Autowired private FirebaseAuthService   firebaseAuthService;
     @Autowired private ResumeTailorService   tailorService;
     @Autowired private ResumeAnalysisService analysisService;
     @Autowired private UserResumeRepository  resumeRepository;
 
-    @Value("${pdf.service.url:http://localhost:3001}")
+    @Value("${pdf.service.url:http://coopilotx-pdf-service:3001}")
     private String pdfServiceUrl;
 
-    // ─── 0. Health Check ───────────────────────────────────────────────────────
+    // ─── 0. Health Check (public — no auth needed) ────────────────────────────
     @GetMapping("/status")
     public ResponseEntity<Map<String, String>> getStatus() {
         return ResponseEntity.ok(Map.of("status", "Live", "database", "Connected"));
@@ -41,9 +48,17 @@ public class ResumeController {
 
     // ─── 1. Missing Skills Analysis ────────────────────────────────────────────
     @PostMapping("/analyze")
-    public ResponseEntity<?> analyzeResume(@RequestBody Map<String, Object> payload) {
+    public ResponseEntity<?> analyzeResume(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            System.out.println("=== MISSING SKILLS ANALYSIS ===");
+            System.out.println("=== MISSING SKILLS ANALYSIS uid=" + user.uid() + " ===");
             String jd = (String) payload.get("jd");
             Map<String, Object> resume = (Map<String, Object>) payload.get("resume");
 
@@ -55,15 +70,24 @@ public class ResumeController {
             Map<String, Object> result = analysisService.analyzeMissingSkills(resume, jd);
             return ResponseEntity.ok(result);
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Analysis failed: " + e.getMessage()));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Analysis failed: " + e.getMessage()));
         }
     }
 
     // ─── 2. AI Tailor ──────────────────────────────────────────────────────────
     @PostMapping("/tailor")
-    public ResponseEntity<?> tailorResume(@RequestBody Map<String, Object> payload) {
+    public ResponseEntity<?> tailorResume(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            System.out.println("=== AI TAILORING REQUEST ===");
+            System.out.println("=== AI TAILORING REQUEST uid=" + user.uid() + " ===");
             String jd = (String) payload.get("jd");
             Map<String, Object> masterResume = (Map<String, Object>) payload.get("masterResume");
             List<String> selectedSkills = payload.containsKey("selectedSkills")
@@ -92,49 +116,85 @@ public class ResumeController {
 
         } catch (RuntimeException e) {
             System.err.println("AI ERROR: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "AI Tailoring failed. Please try again in 30 seconds."));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "AI Tailoring failed. Please try again in 30 seconds."));
         }
     }
 
     // ─── 3. Save Resume ────────────────────────────────────────────────────────
     @PostMapping("/save")
-    public ResponseEntity<?> saveResume(@RequestBody UserResume resume) {
+    public ResponseEntity<?> saveResume(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody UserResume resume) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            System.out.println("=== SAVING RESUME ===");
+            System.out.println("=== SAVING RESUME uid=" + user.uid() + " ===");
+            // Always stamp the authenticated user's UID — never trust client-supplied userId
+            resume.setUserId(user.uid());
             UserResume saved = resumeRepository.save(resume);
             return ResponseEntity.ok(saved);
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Database Error: " + e.getMessage()));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Database Error: " + e.getMessage()));
         }
     }
 
     // ─── 4. Load Resume ────────────────────────────────────────────────────────
     @GetMapping("/load/{id}")
-    public ResponseEntity<?> loadResume(@PathVariable Long id) {
+    public ResponseEntity<?> loadResume(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable Long id) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            Optional<UserResume> resume = resumeRepository.findById(id);
+            // IDOR fix: findByIdAndUserId ensures users can only access their own resumes
+            Optional<UserResume> resume = resumeRepository.findByIdAndUserId(id, user.uid());
             if (resume.isPresent()) return ResponseEntity.ok(resume.get());
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Resume not found."));
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "Resume not found."));
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Load Error: " + e.getMessage()));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Load Error: " + e.getMessage()));
         }
     }
 
     // ─── 5. Export PDF ─────────────────────────────────────────────────────────
     @PostMapping("/export-pdf")
-    public ResponseEntity<?> exportPdf(@RequestBody Map<String, Object> payload) {
+    public ResponseEntity<?> exportPdf(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            System.out.println("=== EXPORT PDF ===");
+            System.out.println("=== EXPORT PDF uid=" + user.uid() + " ===");
             String html      = (String) payload.get("html");
             String paperSize = (String) payload.getOrDefault("paperSize", "a4");
 
             if (html == null || html.trim().isEmpty())
                 return ResponseEntity.badRequest().body(Map.of("error", "HTML content is required."));
 
+            // Sanitize HTML: strip scripts, iframes, objects, and event handlers
+            // to prevent SSRF and XSS via the PDF renderer
+            String cleanHtml = sanitizeHtml(html);
+
             ObjectMapper mapper = new ObjectMapper();
-            String body = mapper.writeValueAsString(Map.of("html", html, "paperSize", paperSize));
+            String body = mapper.writeValueAsString(Map.of("html", cleanHtml, "paperSize", paperSize));
 
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(java.time.Duration.ofSeconds(30))
@@ -171,9 +231,17 @@ public class ResumeController {
 
     // ─── 6. Export Word ────────────────────────────────────────────────────────
     @PostMapping("/export-word")
-    public ResponseEntity<?> exportWord(@RequestBody Map<String, Object> payload) {
+    public ResponseEntity<?> exportWord(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "Authentication required"));
+
         try {
-            System.out.println("=== EXPORT WORD ===");
+            System.out.println("=== EXPORT WORD uid=" + user.uid() + " ===");
 
             ObjectMapper mapper = new ObjectMapper();
             String body = mapper.writeValueAsString(payload);
@@ -210,5 +278,44 @@ public class ResumeController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", "Word export failed: " + e.getMessage()));
         }
+    }
+
+    // ── Helper: verify Firebase Bearer token ────────────────────────────────
+    private AuthUser verifyToken(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) return null;
+        try {
+            String token = authHeader.substring("Bearer ".length()).trim();
+            FirebaseToken decoded = firebaseAuthService.verify(token);
+            return new AuthUser(decoded.getUid(), decoded.getEmail(), decoded.getName());
+        } catch (Exception e) {
+            System.err.println("Token verification failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ── Helper: sanitize HTML to strip scripts/iframes/event-handlers ────────
+    // Preserves all styling and layout elements — only removes dangerous content.
+    private String sanitizeHtml(String html) {
+        Document doc = Jsoup.parse(html);
+        // Remove tags that can load external resources or execute code
+        doc.select("script, iframe, object, embed, applet, base").remove();
+        // Remove event handler attributes (onclick, onerror, onload, etc.)
+        doc.getAllElements().forEach(el ->
+            el.attributes().asList().stream()
+                .filter(a -> a.getKey().toLowerCase().startsWith("on"))
+                .map(org.jsoup.nodes.Attribute::getKey)
+                .toList()
+                .forEach(el::removeAttr)
+        );
+        // Remove javascript: and data: URIs from href/src/action attributes
+        doc.select("[href],[src],[action]").forEach(el -> {
+            for (String attr : List.of("href", "src", "action")) {
+                String val = el.attr(attr).trim().toLowerCase();
+                if (val.startsWith("javascript:") || val.startsWith("data:text/html")) {
+                    el.removeAttr(attr);
+                }
+            }
+        });
+        return doc.outerHtml();
     }
 }
