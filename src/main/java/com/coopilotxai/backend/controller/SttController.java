@@ -24,7 +24,7 @@ import java.util.Map;
  *   503  { "error": "..." }                — key not set on server (env var missing)
  */
 @RestController
-@RequestMapping("/api/stt")
+@RequestMapping("/api/v1/stt")
 public class SttController {
 
     @Autowired
