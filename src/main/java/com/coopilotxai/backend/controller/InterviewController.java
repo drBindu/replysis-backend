@@ -42,7 +42,7 @@ public class InterviewController {
 
     private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
-    private static final String DEFAULT_MODEL   = "llama-3.3-70b-versatile";
+    private static final String DEFAULT_MODEL   = "llama-3.1-8b-instant";
     private static final String VISION_MODEL_GROQ   = "meta-llama/llama-4-scout-17b-16e-instruct";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
