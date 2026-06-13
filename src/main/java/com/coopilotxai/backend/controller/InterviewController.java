@@ -124,40 +124,40 @@ public class InterviewController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
+        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
+        // The SAME aiMessages are reused, so conversation context/prompt stays identical either way.
+        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
+        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String fallbackModel    = fallbackProvider.equals("openai") ? "gpt-4o"        : DEFAULT_MODEL;
+
         // 6. Stream response
         StreamingResponseBody stream = outputStream -> {
             boolean deducted = false;
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
-                var aiPayload = Map.of(
-                    "model",             model,
-                    "messages",          messages,
-                    "temperature",       0.2,
-                    "max_tokens",        700,
-                    "stream",            true,
-                    "top_p",             0.95,
-                    "frequency_penalty", 0.3,
-                    "presence_penalty",  0.15
-                );
+                HttpResponse<java.io.InputStream> response = callAiProvider(endpoint, apiKey, model, messages);
 
-                String body = mapper.writeValueAsString(aiPayload);
+                // Rate limit / server error from the upstream provider is usually transient —
+                // retry once after a short backoff before giving up on this provider.
+                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
+                    Thread.sleep(1200);
+                    response = callAiProvider(endpoint, apiKey, model, messages);
+                }
 
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(endpoint))
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", "Bearer " + apiKey)
-                        .timeout(Duration.ofSeconds(60))
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build();
-
-                HttpResponse<java.io.InputStream> response = httpClient.send(
-                        request, HttpResponse.BodyHandlers.ofInputStream());
+                // Still failing — fall back to the other configured provider with the SAME
+                // messages, so the user gets a real answer instead of a raw error.
+                if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
+                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
+                            + ", falling back to " + fallbackProvider);
+                    response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                }
 
                 if (response.statusCode() != 200) {
                     System.err.println("AI error: HTTP " + response.statusCode());
-                    String err = "data: {\"error\":\"AI service error " + response.statusCode() + "\"}\n\n";
-                    outputStream.write(err.getBytes());
+                    outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                     return;
                 }
@@ -181,8 +181,7 @@ public class InterviewController {
             } catch (Exception e) {
                 System.err.println("Stream error: " + e.getMessage());
                 try {
-                    String err = "data: {\"error\":\"" + e.getMessage() + "\"}\n\n";
-                    outputStream.write(err.getBytes());
+                    outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                 } catch (Exception ignored) {}
             }
@@ -191,6 +190,44 @@ public class InterviewController {
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_EVENT_STREAM)
                 .body(stream);
+    }
+
+    // ── Helper: call an AI provider's chat-completions endpoint with the given messages ──
+    private HttpResponse<java.io.InputStream> callAiProvider(
+            String endpoint, String apiKey, String model, List<?> messages) throws Exception {
+
+        var aiPayload = Map.of(
+            "model",             model,
+            "messages",          messages,
+            "temperature",       0.2,
+            "max_tokens",        700,
+            "stream",            true,
+            "top_p",             0.95,
+            "frequency_penalty", 0.3,
+            "presence_penalty",  0.15
+        );
+
+        String body = mapper.writeValueAsString(aiPayload);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+    }
+
+    // ── Helper: SSE chunk shaped like a normal answer token ─────────────────
+    // Used when every provider is unavailable, so the AI Answer box shows a
+    // graceful in-character message instead of a raw "AI service error" banner.
+    private String friendlyErrorEvent() throws Exception {
+        var chunk = Map.of("choices", List.of(
+                Map.of("delta", Map.of("content",
+                        "Sorry, give me a second — having a brief connection hiccup, please ask again."))));
+        return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
 
     // ── Helper: verify Firebase Bearer token ────────────────────────────────
