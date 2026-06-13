@@ -43,6 +43,8 @@ public class InterviewController {
     private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
     private static final String DEFAULT_MODEL   = "llama-3.3-70b-versatile";
+    private static final String VISION_MODEL_GROQ   = "meta-llama/llama-4-scout-17b-16e-instruct";
+    private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -190,6 +192,142 @@ public class InterviewController {
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_EVENT_STREAM)
                 .body(stream);
+    }
+
+    // ── POST /api/v1/interview/analyze-screen ────────────────────────────────
+    // Vision analysis: verify token → check credits → call vision model → deduct → return
+    @PostMapping(value = "/analyze-screen", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public ResponseEntity<StreamingResponseBody> analyzeScreen(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody Map<String, Object> payload) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        if (!creditsService.canAfford(user.uid())) {
+            return ResponseEntity.status(402).build(); // Payment Required
+        }
+
+        String image    = (String) payload.getOrDefault("image", "");
+        String prompt   = (String) payload.getOrDefault("prompt", "");
+        String provider = (String) payload.getOrDefault("provider", "groq");
+
+        if (image == null || image.isBlank() || prompt == null || prompt.isBlank())
+            return ResponseEntity.badRequest().build();
+
+        String endpoint = provider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String apiKey   = provider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String model    = provider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+
+        if (apiKey == null || apiKey.isBlank()) {
+            System.err.println("No API key for provider: " + provider);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+
+        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
+        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
+        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String fallbackModel    = fallbackProvider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+
+        final String finalImage  = image;
+        final String finalPrompt = prompt;
+
+        StreamingResponseBody stream = outputStream -> {
+            try {
+                List<Map<String, Object>> messages = buildVisionMessages(provider, finalImage, finalPrompt);
+
+                HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
+
+                // Rate limit / server error from the upstream provider is usually transient —
+                // retry once after a short backoff before giving up on this provider.
+                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                    System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
+                    Thread.sleep(1200);
+                    response = callVisionProvider(endpoint, apiKey, model, messages);
+                }
+
+                // Still failing — fall back to the other configured provider, rebuilding
+                // the messages array in that provider's expected shape.
+                if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
+                    System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode()
+                            + ", falling back to " + fallbackProvider);
+                    List<Map<String, Object>> fallbackMessages = buildVisionMessages(fallbackProvider, finalImage, finalPrompt);
+                    response = callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, fallbackMessages);
+                }
+
+                if (response.statusCode() != 200) {
+                    System.err.println("Vision AI error: HTTP " + response.statusCode());
+                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.flush();
+                    return;
+                }
+
+                // Deduct credits now that the vision model responded successfully
+                boolean deducted = creditsService.deductCredits(user.uid());
+                System.out.println("Credits deducted (screen analysis) for uid=" + user.uid() + " success=" + deducted);
+
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(response.body()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("data: ")) {
+                            outputStream.write((line + "\n\n").getBytes());
+                            outputStream.flush();
+                        }
+                    }
+                }
+
+            } catch (Exception e) {
+                System.err.println("Screen analysis stream error: " + e.getMessage());
+                try {
+                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.flush();
+                } catch (Exception ignored) {}
+            }
+        };
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.TEXT_EVENT_STREAM)
+                .body(stream);
+    }
+
+    // ── Helper: build the provider-specific vision "messages" array ──────────
+    // OpenAI supports the "detail" field on image_url; Groq's vision API rejects it.
+    private List<Map<String, Object>> buildVisionMessages(String provider, String base64Image, String prompt) {
+        Map<String, Object> imageUrl = provider.equals("openai")
+                ? Map.of("url", "data:image/png;base64," + base64Image, "detail", "high")
+                : Map.of("url", "data:image/png;base64," + base64Image);
+
+        Map<String, Object> imageContent = Map.of("type", "image_url", "image_url", imageUrl);
+        Map<String, Object> textContent  = Map.of("type", "text", "text", prompt);
+
+        return List.of(Map.of("role", "user", "content", List.of(textContent, imageContent)));
+    }
+
+    // ── Helper: call a vision-capable chat-completions endpoint ───────────────
+    private HttpResponse<java.io.InputStream> callVisionProvider(
+            String endpoint, String apiKey, String model, List<?> messages) throws Exception {
+
+        var aiPayload = Map.of(
+            "model",      model,
+            "messages",   messages,
+            "max_tokens", 4096,
+            "stream",     true
+        );
+
+        String body = mapper.writeValueAsString(aiPayload);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
     }
 
     // ── Helper: call an AI provider's chat-completions endpoint with the given messages ──
