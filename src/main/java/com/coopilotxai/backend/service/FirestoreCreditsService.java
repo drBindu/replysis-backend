@@ -26,7 +26,11 @@ public class FirestoreCreditsService {
             String plan       = snap.getString("plan");
             if (plan == null) plan = "free";
 
-            boolean isUnlimited = plan.equals("pro") || plan.equals("enterprise");
+            // All paid plans are unlimited on the desktop app. The web enforces the
+            // real monthly caps + lazy reset; the backend has no reset, so charging
+            // paid users here would let a desktop-only Lifetime/Teams user hit 0 and
+            // get stuck. Only "free" is metered on this path.
+            boolean isUnlimited = plan.equals("pro") || plan.equals("lifetime") || plan.equals("teams");
             return new UserCredits(
                 credits != null ? credits.intValue() : 0,
                 plan,
