@@ -1,10 +1,9 @@
 package com.coopilotxai.backend.controller;
 
-import com.coopilotxai.backend.security.FirebaseAuthService;
-import com.coopilotxai.backend.security.AuthUser;
+import com.coopilotxai.backend.security.IdentityResolverService;
+import com.coopilotxai.backend.security.RequestIdentity;
 import com.coopilotxai.backend.service.FirestoreCreditsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.firebase.auth.FirebaseToken;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -29,7 +28,7 @@ import java.util.Map;
 public class InterviewController {
 
     @Autowired
-    private FirebaseAuthService firebaseAuthService;
+    private IdentityResolverService identityResolver;
 
     @Autowired
     private FirestoreCreditsService creditsService;
@@ -53,17 +52,22 @@ public class InterviewController {
             .build();
 
     // ── GET /api/v1/interview/credits ────────────────────────────────────────
-    // Returns current credit balance for the authenticated user
+    // Returns current credit balance for the authenticated user, or — with no
+    // Authorization header but an X-Device-Id header instead — the free guest
+    // trial balance for that hardware device (see resolveIdentity()).
     @GetMapping("/credits")
     public ResponseEntity<?> getCredits(
-            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
 
-        AuthUser user = verifyToken(authHeader);
-        if (user == null)
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("error", "Invalid or missing token"));
 
-        FirestoreCreditsService.UserCredits credits = creditsService.getCredits(user.uid());
+        FirestoreCreditsService.UserCredits credits = identity.isGuest()
+                ? creditsService.getGuestCredits(identity.deviceId())
+                : creditsService.getCredits(identity.uid());
         return ResponseEntity.ok(Map.of(
                 "credits",     credits.credits,
                 "plan",        credits.plan,
@@ -76,15 +80,19 @@ public class InterviewController {
     @PostMapping(value = "/ask", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> askQuestion(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
             @RequestBody Map<String, Object> payload) {
 
-        // 1. Verify Firebase token
-        AuthUser user = verifyToken(authHeader);
-        if (user == null)
+        // 1. Verify Firebase token, or fall back to the free guest trial by device ID
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
         // 2. Check credits
-        if (!creditsService.canAfford(user.uid())) {
+        boolean canAfford = identity.isGuest()
+                ? creditsService.canAffordGuest(identity.deviceId())
+                : creditsService.canAfford(identity.uid());
+        if (!canAfford) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
 
@@ -165,8 +173,10 @@ public class InterviewController {
                 }
 
                 // Deduct credits now that AI responded successfully
-                deducted = creditsService.deductCredits(user.uid());
-                System.out.println("Credits deducted for uid=" + user.uid() + " success=" + deducted);
+                deducted = identity.isGuest()
+                        ? creditsService.deductGuestCredits(identity.deviceId())
+                        : creditsService.deductCredits(identity.uid());
+                System.out.println("Credits deducted for " + identity + " success=" + deducted);
 
                 // Stream tokens back to WPF
                 try (BufferedReader reader = new BufferedReader(
@@ -199,13 +209,17 @@ public class InterviewController {
     @PostMapping(value = "/analyze-screen", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> analyzeScreen(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
             @RequestBody Map<String, Object> payload) {
 
-        AuthUser user = verifyToken(authHeader);
-        if (user == null)
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
-        if (!creditsService.canAfford(user.uid())) {
+        boolean canAfford = identity.isGuest()
+                ? creditsService.canAffordGuest(identity.deviceId())
+                : creditsService.canAfford(identity.uid());
+        if (!canAfford) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
 
@@ -265,8 +279,10 @@ public class InterviewController {
                 }
 
                 // Deduct credits now that the vision model responded successfully
-                boolean deducted = creditsService.deductCredits(user.uid());
-                System.out.println("Credits deducted (screen analysis) for uid=" + user.uid() + " success=" + deducted);
+                boolean deducted = identity.isGuest()
+                        ? creditsService.deductGuestCredits(identity.deviceId())
+                        : creditsService.deductCredits(identity.uid());
+                System.out.println("Credits deducted (screen analysis) for " + identity + " success=" + deducted);
 
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body()))) {
@@ -368,18 +384,6 @@ public class InterviewController {
         return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
 
-    // ── Helper: verify Firebase Bearer token ────────────────────────────────
-    private AuthUser verifyToken(String authHeader) {
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) return null;
-        try {
-            String token = authHeader.substring("Bearer ".length()).trim();
-            FirebaseToken decoded = firebaseAuthService.verify(token);
-            return new AuthUser(decoded.getUid(), decoded.getEmail(), decoded.getName());
-        } catch (Exception e) {
-            System.err.println("Token verification failed: " + e.getMessage());
-            return null;
-        }
-    }
 
     // ── Helper: system prompt — exact same rules as PromptBuilder.cs in the Windows app ──
     // Used as fallback when the client sends no messages array.

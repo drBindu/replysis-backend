@@ -12,6 +12,14 @@ public class FirestoreCreditsService {
 
     private static final int INTERVIEW_QUESTION_COST = 5;
 
+    // Free trial for people who haven't signed in yet — 100 credits (= 20 questions
+    // at 5 each), tracked per-device so the same physical Mac can't just re-trigger it
+    // by clearing app data. See getGuestCredits()/deductGuestCredits() below. The device
+    // ID itself is the Mac's IOPlatformUUID (hardware-tied, survives app reinstall —
+    // see DeviceIdentity.swift), not anything the app can regenerate on its own.
+    private static final int GUEST_FREE_CREDITS = 100;
+    private static final String ANON_COLLECTION = "anon_devices";
+
     // ── Get user's current credits and plan ──────────────────────────────────
     public UserCredits getCredits(String uid) {
         try {
@@ -72,6 +80,50 @@ public class FirestoreCreditsService {
             return true;
         } catch (Exception e) {
             System.err.println("Firestore deductCredits error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    // ── Guest (no sign-in) credits, tracked per hardware device ID ───────────
+
+    public UserCredits getGuestCredits(String deviceId) {
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+            DocumentSnapshot snap = ref.get().get();
+
+            if (!snap.exists()) {
+                // First time this device has ever been seen — grant the full free trial.
+                ref.set(java.util.Map.of("credits", GUEST_FREE_CREDITS)).get();
+                return new UserCredits(GUEST_FREE_CREDITS, "guest", false);
+            }
+            Long credits = snap.getLong("credits");
+            return new UserCredits(credits != null ? credits.intValue() : 0, "guest", false);
+        } catch (Exception e) {
+            System.err.println("Firestore getGuestCredits error: " + e.getMessage());
+            return new UserCredits(0, "guest", false);
+        }
+    }
+
+    public boolean canAffordGuest(String deviceId) {
+        return getGuestCredits(deviceId).credits >= INTERVIEW_QUESTION_COST;
+    }
+
+    public boolean deductGuestCredits(String deviceId) {
+        try {
+            UserCredits current = getGuestCredits(deviceId);
+            if (current.credits < INTERVIEW_QUESTION_COST) return false;
+
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+            ref.update("credits", FieldValue.increment(-INTERVIEW_QUESTION_COST)).get();
+
+            System.out.println("Guest credits deducted: device=" + deviceId +
+                " cost=" + INTERVIEW_QUESTION_COST +
+                " remaining=" + (current.credits - INTERVIEW_QUESTION_COST));
+            return true;
+        } catch (Exception e) {
+            System.err.println("Firestore deductGuestCredits error: " + e.getMessage());
             return false;
         }
     }
