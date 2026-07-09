@@ -12,14 +12,15 @@ public class FirestoreCreditsService {
 
     private static final int INTERVIEW_QUESTION_COST = 5;
 
-    // Free trial for people who haven't signed in yet — 150 credits (= 30 questions
-    // at 5 each), sized to cover one full interview so a first-timer sees real value
-    // before the wall. Granted ONCE per device and never reset — an occasional-use paid
-    // product converts best when the trial is a single great experience, not a recurring
-    // free tier that removes any reason to pay. Tracked per-device so the same physical
-    // Mac can't re-trigger it by clearing app data or reinstalling: the device ID is the
-    // Mac's IOPlatformUUID (hardware-tied — see DeviceIdentity.swift), not app-generated.
-    private static final int GUEST_FREE_CREDITS = 150;
+    // Free trial for people who haven't signed in yet — 100 credits (= 20 questions
+    // at 5 each). Granted ONCE per device and never reset: when it runs out the app
+    // prompts the user to sign in and buy more (buying requires an account). An
+    // occasional-use paid product converts best when the trial is a single experience,
+    // not a recurring free tier that removes any reason to pay. Tracked per-device so the
+    // same physical Mac can't re-trigger it by clearing app data or reinstalling: the
+    // device ID is the Mac's IOPlatformUUID (hardware-tied — see DeviceIdentity.swift),
+    // not app-generated.
+    private static final int GUEST_FREE_CREDITS = 100;
     private static final String ANON_COLLECTION = "anon_devices";
 
     // ── Get user's current credits and plan ──────────────────────────────────
