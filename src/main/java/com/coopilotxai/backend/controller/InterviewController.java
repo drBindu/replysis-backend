@@ -1,10 +1,9 @@
 package com.coopilotxai.backend.controller;
 
-import com.coopilotxai.backend.security.FirebaseAuthService;
-import com.coopilotxai.backend.security.AuthUser;
+import com.coopilotxai.backend.security.IdentityResolverService;
+import com.coopilotxai.backend.security.RequestIdentity;
 import com.coopilotxai.backend.service.FirestoreCreditsService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.firebase.auth.FirebaseToken;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -29,7 +28,7 @@ import java.util.Map;
 public class InterviewController {
 
     @Autowired
-    private FirebaseAuthService firebaseAuthService;
+    private IdentityResolverService identityResolver;
 
     @Autowired
     private FirestoreCreditsService creditsService;
@@ -42,7 +41,9 @@ public class InterviewController {
 
     private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
-    private static final String DEFAULT_MODEL   = "llama-3.3-70b-versatile";
+    private static final String DEFAULT_MODEL   = "llama-3.1-8b-instant";
+    private static final String VISION_MODEL_GROQ   = "meta-llama/llama-4-scout-17b-16e-instruct";
+    private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -51,17 +52,22 @@ public class InterviewController {
             .build();
 
     // ── GET /api/v1/interview/credits ────────────────────────────────────────
-    // Returns current credit balance for the authenticated user
+    // Returns current credit balance for the authenticated user, or — with no
+    // Authorization header but an X-Device-Id header instead — the free guest
+    // trial balance for that hardware device (see resolveIdentity()).
     @GetMapping("/credits")
     public ResponseEntity<?> getCredits(
-            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
 
-        AuthUser user = verifyToken(authHeader);
-        if (user == null)
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("error", "Invalid or missing token"));
 
-        FirestoreCreditsService.UserCredits credits = creditsService.getCredits(user.uid());
+        FirestoreCreditsService.UserCredits credits = identity.isGuest()
+                ? creditsService.getGuestCredits(identity.deviceId())
+                : creditsService.getCredits(identity.uid());
         return ResponseEntity.ok(Map.of(
                 "credits",     credits.credits,
                 "plan",        credits.plan,
@@ -74,15 +80,19 @@ public class InterviewController {
     @PostMapping(value = "/ask", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> askQuestion(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
             @RequestBody Map<String, Object> payload) {
 
-        // 1. Verify Firebase token
-        AuthUser user = verifyToken(authHeader);
-        if (user == null)
+        // 1. Verify Firebase token, or fall back to the free guest trial by device ID
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
         // 2. Check credits
-        if (!creditsService.canAfford(user.uid())) {
+        boolean canAfford = identity.isGuest()
+                ? creditsService.canAffordGuest(identity.deviceId())
+                : creditsService.canAfford(identity.uid());
+        if (!canAfford) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
 
@@ -124,47 +134,49 @@ public class InterviewController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
+        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
+        // The SAME aiMessages are reused, so conversation context/prompt stays identical either way.
+        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
+        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String fallbackModel    = fallbackProvider.equals("openai") ? "gpt-4o"        : DEFAULT_MODEL;
+
         // 6. Stream response
         StreamingResponseBody stream = outputStream -> {
             boolean deducted = false;
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
-                var aiPayload = Map.of(
-                    "model",             model,
-                    "messages",          messages,
-                    "temperature",       0.2,
-                    "max_tokens",        700,
-                    "stream",            true,
-                    "top_p",             0.95,
-                    "frequency_penalty", 0.3,
-                    "presence_penalty",  0.15
-                );
+                HttpResponse<java.io.InputStream> response = callAiProvider(endpoint, apiKey, model, messages);
 
-                String body = mapper.writeValueAsString(aiPayload);
+                // Rate limit / server error from the upstream provider is usually transient —
+                // retry once after a short backoff before giving up on this provider.
+                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
+                    Thread.sleep(1200);
+                    response = callAiProvider(endpoint, apiKey, model, messages);
+                }
 
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(endpoint))
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", "Bearer " + apiKey)
-                        .timeout(Duration.ofSeconds(60))
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build();
-
-                HttpResponse<java.io.InputStream> response = httpClient.send(
-                        request, HttpResponse.BodyHandlers.ofInputStream());
+                // Still failing — fall back to the other configured provider with the SAME
+                // messages, so the user gets a real answer instead of a raw error.
+                if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
+                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
+                            + ", falling back to " + fallbackProvider);
+                    response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                }
 
                 if (response.statusCode() != 200) {
                     System.err.println("AI error: HTTP " + response.statusCode());
-                    String err = "data: {\"error\":\"AI service error " + response.statusCode() + "\"}\n\n";
-                    outputStream.write(err.getBytes());
+                    outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                     return;
                 }
 
                 // Deduct credits now that AI responded successfully
-                deducted = creditsService.deductCredits(user.uid());
-                System.out.println("Credits deducted for uid=" + user.uid() + " success=" + deducted);
+                deducted = identity.isGuest()
+                        ? creditsService.deductGuestCredits(identity.deviceId())
+                        : creditsService.deductCredits(identity.uid());
+                System.out.println("Credits deducted for " + identity + " success=" + deducted);
 
                 // Stream tokens back to WPF
                 try (BufferedReader reader = new BufferedReader(
@@ -181,8 +193,7 @@ public class InterviewController {
             } catch (Exception e) {
                 System.err.println("Stream error: " + e.getMessage());
                 try {
-                    String err = "data: {\"error\":\"" + e.getMessage() + "\"}\n\n";
-                    outputStream.write(err.getBytes());
+                    outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                 } catch (Exception ignored) {}
             }
@@ -193,18 +204,186 @@ public class InterviewController {
                 .body(stream);
     }
 
-    // ── Helper: verify Firebase Bearer token ────────────────────────────────
-    private AuthUser verifyToken(String authHeader) {
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) return null;
-        try {
-            String token = authHeader.substring("Bearer ".length()).trim();
-            FirebaseToken decoded = firebaseAuthService.verify(token);
-            return new AuthUser(decoded.getUid(), decoded.getEmail(), decoded.getName());
-        } catch (Exception e) {
-            System.err.println("Token verification failed: " + e.getMessage());
-            return null;
+    // ── POST /api/v1/interview/analyze-screen ────────────────────────────────
+    // Vision analysis: verify token → check credits → call vision model → deduct → return
+    @PostMapping(value = "/analyze-screen", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public ResponseEntity<StreamingResponseBody> analyzeScreen(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            @RequestBody Map<String, Object> payload) {
+
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        boolean canAfford = identity.isGuest()
+                ? creditsService.canAffordGuest(identity.deviceId())
+                : creditsService.canAfford(identity.uid());
+        if (!canAfford) {
+            return ResponseEntity.status(402).build(); // Payment Required
         }
+
+        String image    = (String) payload.getOrDefault("image", "");
+        String prompt   = (String) payload.getOrDefault("prompt", "");
+        String provider = (String) payload.getOrDefault("provider", "groq");
+
+        if (image == null || image.isBlank() || prompt == null || prompt.isBlank())
+            return ResponseEntity.badRequest().build();
+
+        String endpoint = provider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String apiKey   = provider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String model    = provider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+
+        if (apiKey == null || apiKey.isBlank()) {
+            System.err.println("No API key for provider: " + provider);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+
+        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
+        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
+        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
+        String fallbackModel    = fallbackProvider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+
+        final String finalImage  = image;
+        final String finalPrompt = prompt;
+
+        StreamingResponseBody stream = outputStream -> {
+            try {
+                List<Map<String, Object>> messages = buildVisionMessages(provider, finalImage, finalPrompt);
+
+                HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
+
+                // Rate limit / server error from the upstream provider is usually transient —
+                // retry once after a short backoff before giving up on this provider.
+                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                    System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
+                    Thread.sleep(1200);
+                    response = callVisionProvider(endpoint, apiKey, model, messages);
+                }
+
+                // Still failing — fall back to the other configured provider, rebuilding
+                // the messages array in that provider's expected shape.
+                if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
+                    System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode()
+                            + ", falling back to " + fallbackProvider);
+                    List<Map<String, Object>> fallbackMessages = buildVisionMessages(fallbackProvider, finalImage, finalPrompt);
+                    response = callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, fallbackMessages);
+                }
+
+                if (response.statusCode() != 200) {
+                    System.err.println("Vision AI error: HTTP " + response.statusCode());
+                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.flush();
+                    return;
+                }
+
+                // Deduct credits now that the vision model responded successfully
+                boolean deducted = identity.isGuest()
+                        ? creditsService.deductGuestCredits(identity.deviceId())
+                        : creditsService.deductCredits(identity.uid());
+                System.out.println("Credits deducted (screen analysis) for " + identity + " success=" + deducted);
+
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(response.body()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("data: ")) {
+                            outputStream.write((line + "\n\n").getBytes());
+                            outputStream.flush();
+                        }
+                    }
+                }
+
+            } catch (Exception e) {
+                System.err.println("Screen analysis stream error: " + e.getMessage());
+                try {
+                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.flush();
+                } catch (Exception ignored) {}
+            }
+        };
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.TEXT_EVENT_STREAM)
+                .body(stream);
     }
+
+    // ── Helper: build the provider-specific vision "messages" array ──────────
+    // OpenAI supports the "detail" field on image_url; Groq's vision API rejects it.
+    private List<Map<String, Object>> buildVisionMessages(String provider, String base64Image, String prompt) {
+        Map<String, Object> imageUrl = provider.equals("openai")
+                ? Map.of("url", "data:image/png;base64," + base64Image, "detail", "high")
+                : Map.of("url", "data:image/png;base64," + base64Image);
+
+        Map<String, Object> imageContent = Map.of("type", "image_url", "image_url", imageUrl);
+        Map<String, Object> textContent  = Map.of("type", "text", "text", prompt);
+
+        return List.of(Map.of("role", "user", "content", List.of(textContent, imageContent)));
+    }
+
+    // ── Helper: call a vision-capable chat-completions endpoint ───────────────
+    private HttpResponse<java.io.InputStream> callVisionProvider(
+            String endpoint, String apiKey, String model, List<?> messages) throws Exception {
+
+        var aiPayload = Map.of(
+            "model",      model,
+            "messages",   messages,
+            "max_tokens", 4096,
+            "stream",     true
+        );
+
+        String body = mapper.writeValueAsString(aiPayload);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+    }
+
+    // ── Helper: call an AI provider's chat-completions endpoint with the given messages ──
+    private HttpResponse<java.io.InputStream> callAiProvider(
+            String endpoint, String apiKey, String model, List<?> messages) throws Exception {
+
+        var aiPayload = Map.of(
+            "model",             model,
+            "messages",          messages,
+            "temperature",       0.2,
+            "max_tokens",        700,
+            "stream",            true,
+            "top_p",             0.95,
+            "frequency_penalty", 0.3,
+            "presence_penalty",  0.15
+        );
+
+        String body = mapper.writeValueAsString(aiPayload);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(60))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+    }
+
+    // ── Helper: SSE chunk shaped like a normal answer token ─────────────────
+    // Used when every provider is unavailable, so the AI Answer box shows a
+    // graceful in-character message instead of a raw "AI service error" banner.
+    private String friendlyErrorEvent() throws Exception {
+        var chunk = Map.of("choices", List.of(
+                Map.of("delta", Map.of("content",
+                        "Sorry, give me a second — having a brief connection hiccup, please ask again."))));
+        return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
+    }
+
 
     // ── Helper: system prompt — exact same rules as PromptBuilder.cs in the Windows app ──
     // Used as fallback when the client sends no messages array.
