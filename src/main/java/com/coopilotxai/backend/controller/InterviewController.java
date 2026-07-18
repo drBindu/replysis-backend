@@ -88,14 +88,6 @@ public class InterviewController {
         if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
-        // 2. Check credits
-        boolean canAfford = identity.isGuest()
-                ? creditsService.canAffordGuest(identity.deviceId())
-                : creditsService.canAfford(identity.uid());
-        if (!canAfford) {
-            return ResponseEntity.status(402).build(); // Payment Required
-        }
-
         // 3. Extract payload
         String question  = (String) payload.getOrDefault("question", "");
         String resume    = (String) payload.getOrDefault("resume", "");
@@ -141,9 +133,19 @@ public class InterviewController {
         String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
         String fallbackModel    = fallbackProvider.equals("openai") ? "gpt-4o"        : DEFAULT_MODEL;
 
-        // 6. Stream response
+        // 6. Charge UP FRONT (atomic). Deducting after the AI answered meant a
+        //    failed deduction still served a free answer; charging first closes
+        //    that hole. If every provider fails below, the charge is refunded.
+        boolean charged = identity.isGuest()
+                ? creditsService.deductGuestCredits(identity.deviceId())
+                : creditsService.deductCredits(identity.uid());
+        if (!charged) {
+            return ResponseEntity.status(402).build(); // Payment Required
+        }
+
+        // 7. Stream response
         StreamingResponseBody stream = outputStream -> {
-            boolean deducted = false;
+            boolean served = false;
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
@@ -172,12 +174,6 @@ public class InterviewController {
                     return;
                 }
 
-                // Deduct credits now that AI responded successfully
-                deducted = identity.isGuest()
-                        ? creditsService.deductGuestCredits(identity.deviceId())
-                        : creditsService.deductCredits(identity.uid());
-                System.out.println("Credits deducted for " + identity + " success=" + deducted);
-
                 // Stream tokens back to WPF
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body()))) {
@@ -189,6 +185,7 @@ public class InterviewController {
                         }
                     }
                 }
+                served = true;
 
             } catch (Exception e) {
                 System.err.println("Stream error: " + e.getMessage());
@@ -196,6 +193,12 @@ public class InterviewController {
                     outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                 } catch (Exception ignored) {}
+            } finally {
+                // No answer was delivered — return the up-front charge.
+                if (!served) {
+                    if (identity.isGuest()) creditsService.refundGuestCredits(identity.deviceId());
+                    else                    creditsService.refundCredits(identity.uid());
+                }
             }
         };
 
@@ -215,13 +218,6 @@ public class InterviewController {
         RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
         if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
-
-        boolean canAfford = identity.isGuest()
-                ? creditsService.canAffordGuest(identity.deviceId())
-                : creditsService.canAfford(identity.uid());
-        if (!canAfford) {
-            return ResponseEntity.status(402).build(); // Payment Required
-        }
 
         String image    = (String) payload.getOrDefault("image", "");
         String prompt   = (String) payload.getOrDefault("prompt", "");
@@ -248,7 +244,17 @@ public class InterviewController {
         final String finalImage  = image;
         final String finalPrompt = prompt;
 
+        // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
+        // and a refund below if every vision provider fails.
+        boolean charged = identity.isGuest()
+                ? creditsService.deductGuestCredits(identity.deviceId())
+                : creditsService.deductCredits(identity.uid());
+        if (!charged) {
+            return ResponseEntity.status(402).build(); // Payment Required
+        }
+
         StreamingResponseBody stream = outputStream -> {
+            boolean served = false;
             try {
                 List<Map<String, Object>> messages = buildVisionMessages(provider, finalImage, finalPrompt);
 
@@ -278,12 +284,6 @@ public class InterviewController {
                     return;
                 }
 
-                // Deduct credits now that the vision model responded successfully
-                boolean deducted = identity.isGuest()
-                        ? creditsService.deductGuestCredits(identity.deviceId())
-                        : creditsService.deductCredits(identity.uid());
-                System.out.println("Credits deducted (screen analysis) for " + identity + " success=" + deducted);
-
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body()))) {
                     String line;
@@ -294,6 +294,7 @@ public class InterviewController {
                         }
                     }
                 }
+                served = true;
 
             } catch (Exception e) {
                 System.err.println("Screen analysis stream error: " + e.getMessage());
@@ -301,6 +302,12 @@ public class InterviewController {
                     outputStream.write(friendlyErrorEvent().getBytes());
                     outputStream.flush();
                 } catch (Exception ignored) {}
+            } finally {
+                // No answer was delivered — return the up-front charge.
+                if (!served) {
+                    if (identity.isGuest()) creditsService.refundGuestCredits(identity.deviceId());
+                    else                    creditsService.refundCredits(identity.uid());
+                }
             }
         };
 

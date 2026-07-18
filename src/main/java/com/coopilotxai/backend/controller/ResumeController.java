@@ -40,6 +40,11 @@ public class ResumeController {
     @Value("${pdf.service.url:http://coopilotx-pdf-service:3001}")
     private String pdfServiceUrl;
 
+    // Shared secret sent as X-Service-Token; the PDF service rejects requests
+    // without it so it can never be driven by anything but this backend.
+    @Value("${pdf.service.token:}")
+    private String pdfServiceToken;
+
     // ─── 0. Health Check (public — no auth needed) ────────────────────────────
     @GetMapping("/status")
     public ResponseEntity<Map<String, String>> getStatus() {
@@ -203,6 +208,7 @@ public class ResumeController {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(pdfServiceUrl + "/generate-pdf"))
                     .header("Content-Type", "application/json")
+                    .header("X-Service-Token", pdfServiceToken)
                     .timeout(java.time.Duration.ofSeconds(60))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
@@ -253,6 +259,7 @@ public class ResumeController {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(pdfServiceUrl + "/generate-word"))
                     .header("Content-Type", "application/json")
+                    .header("X-Service-Token", pdfServiceToken)
                     .timeout(java.time.Duration.ofSeconds(60))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
