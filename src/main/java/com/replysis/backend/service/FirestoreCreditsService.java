@@ -1,0 +1,381 @@
+package com.replysis.backend.service;
+
+import com.google.cloud.firestore.DocumentReference;
+import com.google.cloud.firestore.DocumentSnapshot;
+import com.google.cloud.firestore.Firestore;
+import com.google.firebase.cloud.FirestoreClient;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.Map;
+
+@Service
+public class FirestoreCreditsService {
+
+    private static final int INTERVIEW_QUESTION_COST = 5;
+    private static final int GUEST_FREE_CREDITS = 100;
+    private static final String ANON_COLLECTION = "anon_devices";
+
+    private static final Map<String, Integer> PLAN_MONTHLY_CREDITS = Map.of(
+            "free", 100,
+            "pro", 5_000,
+            "lifetime", 5_000,
+            "teams", 10_000
+    );
+
+    public UserCredits getCredits(String uid) {
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection("users").document(uid);
+
+            return db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) return new UserCredits(0, "free", false);
+
+                String plan = normalizePlan(snap.getString("plan"));
+                long credits = readCredits(snap);
+                if (isUnlimitedPlan(plan)) {
+                    return new UserCredits(safeInt(credits), plan, true);
+                }
+                Instant resetAt = readResetDate(snap);
+
+                if (resetAt == null) {
+                    tx.update(ref, "creditsResetDate", nextResetDate());
+                } else if (!Instant.now().isBefore(resetAt)) {
+                    credits = monthlyCredits(plan);
+                    tx.update(ref,
+                            "credits", credits,
+                            "creditsUsed", 0,
+                            "creditsResetDate", nextResetDate());
+                }
+
+                return new UserCredits(safeInt(credits), plan, false);
+            }).get();
+        } catch (Exception e) {
+            System.err.println("Firestore getCredits error: " + e.getMessage());
+            return new UserCredits(0, "free", false);
+        }
+    }
+
+    public boolean canAfford(String uid) {
+        return canAfford(uid, INTERVIEW_QUESTION_COST);
+    }
+
+    public boolean canAfford(String uid, int cost) {
+        UserCredits current = getCredits(uid);
+        return cost >= 0 && (current.isUnlimited || current.credits >= cost);
+    }
+
+    public boolean deductCredits(String uid) {
+        return deductCredits(uid, INTERVIEW_QUESTION_COST);
+    }
+
+    public boolean deductCredits(String uid, int cost) {
+        if (cost < 0) return false;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection("users").document(uid);
+
+            boolean deducted = db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) return false;
+
+                String plan = normalizePlan(snap.getString("plan"));
+                if (isUnlimitedPlan(plan)) return true;
+                long credits = readCredits(snap);
+                long creditsUsed = readLong(snap, "creditsUsed");
+                Instant resetAt = readResetDate(snap);
+                boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
+
+                if (resetNeeded) {
+                    credits = monthlyCredits(plan);
+                    creditsUsed = 0;
+                }
+
+                if (credits < cost) {
+                    if (resetAt == null || resetNeeded) {
+                        tx.update(ref,
+                                "credits", credits,
+                                "creditsUsed", creditsUsed,
+                                "creditsResetDate", nextResetDate());
+                    }
+                    return false;
+                }
+
+                tx.update(ref,
+                        "credits", credits - cost,
+                        "creditsUsed", creditsUsed + cost,
+                        "creditsResetDate", resetAt == null || resetNeeded
+                                ? nextResetDate() : resetAt.toString());
+                return true;
+            }).get();
+
+            if (deducted) {
+                System.out.println("Credits deducted: uid=" + uid + " cost=" + cost);
+            }
+            return deducted;
+        } catch (Exception e) {
+            System.err.println("Firestore deductCredits error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void refundCredits(String uid) {
+        refundCredits(uid, INTERVIEW_QUESTION_COST);
+    }
+
+    public void refundCredits(String uid, int cost) {
+        if (cost <= 0) return;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection("users").document(uid);
+            db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) return false;
+
+                String plan = normalizePlan(snap.getString("plan"));
+                if (isUnlimitedPlan(plan)) return false;
+                int cap = monthlyCredits(plan);
+                long credits = readCredits(snap);
+                long creditsUsed = readLong(snap, "creditsUsed");
+                Instant resetAt = readResetDate(snap);
+                boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
+
+                if (resetNeeded) {
+                    credits = cap;
+                    creditsUsed = 0;
+                } else {
+                    credits = Math.min(cap, credits + cost);
+                    creditsUsed = Math.max(0, creditsUsed - cost);
+                }
+
+                tx.update(ref,
+                        "credits", credits,
+                        "creditsUsed", creditsUsed,
+                        "creditsResetDate", resetAt == null || resetNeeded
+                                ? nextResetDate() : resetAt.toString());
+                return true;
+            }).get();
+            System.out.println("Credits refunded: uid=" + uid + " amount=" + cost);
+        } catch (Exception e) {
+            System.err.println("Firestore refundCredits error: " + e.getMessage());
+        }
+    }
+
+    public UserCredits getGuestCredits(String deviceId) {
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+
+            return db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) {
+                    tx.set(ref, newGuestDocument(GUEST_FREE_CREDITS));
+                    return new UserCredits(GUEST_FREE_CREDITS, "guest", false);
+                }
+
+                long credits = readCredits(snap);
+                Instant resetAt = readResetDate(snap);
+                if (resetAt == null || !Instant.now().isBefore(resetAt)) {
+                    credits = GUEST_FREE_CREDITS;
+                    tx.update(ref,
+                            "credits", credits,
+                            "creditsUsed", 0,
+                            "creditsResetDate", nextResetDate(),
+                            "plan", "guest");
+                }
+                return new UserCredits(safeInt(credits), "guest", false);
+            }).get();
+        } catch (Exception e) {
+            System.err.println("Firestore getGuestCredits error: " + e.getMessage());
+            return new UserCredits(0, "guest", false);
+        }
+    }
+
+    public boolean canAffordGuest(String deviceId) {
+        return canAffordGuest(deviceId, INTERVIEW_QUESTION_COST);
+    }
+
+    public boolean canAffordGuest(String deviceId, int cost) {
+        return cost >= 0 && getGuestCredits(deviceId).credits >= cost;
+    }
+
+    public boolean deductGuestCredits(String deviceId) {
+        return deductGuestCredits(deviceId, INTERVIEW_QUESTION_COST);
+    }
+
+    public boolean deductGuestCredits(String deviceId, int cost) {
+        if (cost < 0) return false;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+
+            boolean deducted = db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                long credits;
+                long creditsUsed;
+                Instant resetAt;
+
+                if (!snap.exists()) {
+                    credits = GUEST_FREE_CREDITS;
+                    creditsUsed = 0;
+                    resetAt = null;
+                } else {
+                    credits = readCredits(snap);
+                    creditsUsed = readLong(snap, "creditsUsed");
+                    resetAt = readResetDate(snap);
+                    if (resetAt == null || !Instant.now().isBefore(resetAt)) {
+                        credits = GUEST_FREE_CREDITS;
+                        creditsUsed = 0;
+                    }
+                }
+
+                boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
+                if (credits < cost) {
+                    if (!snap.exists()) {
+                        tx.set(ref, newGuestDocument(credits));
+                    } else if (resetAt == null || resetNeeded) {
+                        tx.update(ref,
+                                "credits", credits,
+                                "creditsUsed", creditsUsed,
+                                "creditsResetDate", nextResetDate(),
+                                "plan", "guest");
+                    }
+                    return false;
+                }
+
+                Map<String, Object> updated = Map.of(
+                        "credits", credits - cost,
+                        "creditsUsed", creditsUsed + cost,
+                        "creditsResetDate", resetAt == null || resetNeeded
+                                ? nextResetDate() : resetAt.toString(),
+                        "plan", "guest"
+                );
+                if (snap.exists()) tx.update(ref, updated);
+                else tx.set(ref, updated);
+                return true;
+            }).get();
+
+            if (deducted) {
+                System.out.println("Guest credits deducted: device=" + deviceId + " cost=" + cost);
+            }
+            return deducted;
+        } catch (Exception e) {
+            System.err.println("Firestore deductGuestCredits error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void refundGuestCredits(String deviceId) {
+        refundGuestCredits(deviceId, INTERVIEW_QUESTION_COST);
+    }
+
+    public void refundGuestCredits(String deviceId, int cost) {
+        if (cost <= 0) return;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+            db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) return false;
+
+                long credits = readCredits(snap);
+                long creditsUsed = readLong(snap, "creditsUsed");
+                Instant resetAt = readResetDate(snap);
+                boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
+
+                if (resetAt == null || resetNeeded) {
+                    credits = GUEST_FREE_CREDITS;
+                    creditsUsed = 0;
+                } else {
+                    credits = Math.min(GUEST_FREE_CREDITS, credits + cost);
+                    creditsUsed = Math.max(0, creditsUsed - cost);
+                }
+
+                tx.update(ref,
+                        "credits", credits,
+                        "creditsUsed", creditsUsed,
+                        "creditsResetDate", resetAt == null || resetNeeded
+                                ? nextResetDate() : resetAt.toString(),
+                        "plan", "guest");
+                return true;
+            }).get();
+            System.out.println("Guest credits refunded: device=" + deviceId + " amount=" + cost);
+        } catch (Exception e) {
+            System.err.println("Firestore refundGuestCredits error: " + e.getMessage());
+        }
+    }
+
+    private static Map<String, Object> newGuestDocument(long credits) {
+        return Map.of(
+                "credits", credits,
+                "creditsUsed", GUEST_FREE_CREDITS - credits,
+                "creditsResetDate", nextResetDate(),
+                "plan", "guest"
+        );
+    }
+
+    private static String normalizePlan(String plan) {
+        if (plan == null) return "free";
+        String normalized = plan.trim().toLowerCase();
+        return PLAN_MONTHLY_CREDITS.containsKey(normalized) ? normalized : "free";
+    }
+
+    private static int monthlyCredits(String plan) {
+        return PLAN_MONTHLY_CREDITS.getOrDefault(normalizePlan(plan), 100);
+    }
+
+    private static boolean isUnlimitedPlan(String plan) {
+        String normalized = normalizePlan(plan);
+        return "pro".equals(normalized) || "lifetime".equals(normalized) || "teams".equals(normalized);
+    }
+
+    private static long readCredits(DocumentSnapshot snap) {
+        return readLong(snap, "credits");
+    }
+
+    private static long readLong(DocumentSnapshot snap, String field) {
+        Long value = snap.getLong(field);
+        return value != null ? Math.max(0, value) : 0;
+    }
+
+    private static Instant readResetDate(DocumentSnapshot snap) {
+        Object raw = snap.get("creditsResetDate");
+        if (raw instanceof String value && !value.isBlank()) {
+            try {
+                return Instant.parse(value);
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static String nextResetDate() {
+        return ZonedDateTime.now(ZoneOffset.UTC)
+                .plusMonths(1)
+                .withDayOfMonth(1)
+                .truncatedTo(ChronoUnit.DAYS)
+                .toInstant()
+                .toString();
+    }
+
+    private static int safeInt(long value) {
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(0, value));
+    }
+
+    public static class UserCredits {
+        public final int credits;
+        public final String plan;
+        public final boolean isUnlimited;
+
+        public UserCredits(int credits, String plan, boolean isUnlimited) {
+            this.credits = credits;
+            this.plan = plan;
+            this.isUnlimited = isUnlimited;
+        }
+    }
+}
