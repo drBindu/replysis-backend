@@ -54,8 +54,13 @@ public class InterviewController {
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     private static final int    MAX_RESUME_CHARS = 30_000;
-    private static final int    MAX_MESSAGE_COUNT = 30;
-    private static final int    MAX_MESSAGE_CHARS = 6_000;
+    // Abuse ceilings, not size targets. The client's system message carries the
+    // resume (up to MAX_RESUME_CHARS) plus locked facts and format rules, so it
+    // is routinely far larger than a chat turn: a real request was measured at
+    // 10,638 bytes across 2 messages and a 6,000-char cap silently rejected it.
+    // A long interview also accumulates history, so the count must leave room.
+    private static final int    MAX_MESSAGE_COUNT = 100;
+    private static final int    MAX_MESSAGE_CHARS = 60_000;
     private static final int    MAX_IMAGE_BASE64_CHARS = 8_000_000;
     private static final int    PER_IDENTITY_PER_MINUTE = 12;
     private static final int    PER_IP_PER_MINUTE = 30;
@@ -112,12 +117,15 @@ public class InterviewController {
         String question = text(payload.get("question"), MAX_QUESTION_CHARS);
         String resume = textOrEmpty(payload.get("resume"), MAX_RESUME_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
-        if (providerInput == null) return ResponseEntity.badRequest().build();
+        if (providerInput == null) return rejectAsk("provider field was not usable text");
         final String provider = providerInput.isBlank() ? "groq" : providerInput.toLowerCase();
 
-        if (question == null || question.isBlank() || resume == null
-                || (!provider.equals("groq") && !provider.equals("openai")))
-            return ResponseEntity.badRequest().build();
+        if (question == null || question.isBlank())
+            return rejectAsk("question missing, blank, or longer than " + MAX_QUESTION_CHARS + " chars");
+        if (resume == null)
+            return rejectAsk("resume longer than " + MAX_RESUME_CHARS + " chars");
+        if (!provider.equals("groq") && !provider.equals("openai"))
+            return rejectAsk("provider not on the allow-list");
 
         // 4. Build AI messages.
         //    Prefer the client-supplied messages array — it carries full conversation
@@ -126,7 +134,9 @@ public class InterviewController {
         Object rawMessages = payload.get("messages");
         List<Map<String, Object>> clientMessages = sanitizeMessages(rawMessages);
         if (rawMessages != null && clientMessages == null)
-            return ResponseEntity.badRequest().build();
+            return rejectAsk("messages array rejected: over " + MAX_MESSAGE_COUNT
+                    + " messages, a message over " + MAX_MESSAGE_CHARS
+                    + " chars, a blank message, or a bad role/shape");
 
         final List<?> aiMessages;
         if (clientMessages != null && !clientMessages.isEmpty()) {
@@ -368,6 +378,17 @@ public class InterviewController {
     private static String textOrEmpty(Object value, int maximumLength) {
         if (value == null) return "";
         return text(value, maximumLength);
+    }
+
+    /**
+     * A validation rejection used to return 400 with no trace at all, so a user
+     * saw "we could not generate an answer" while the server logged nothing.
+     * The reason is recorded here; it names the failed rule and sizes only,
+     * never any question, resume, or message content.
+     */
+    private static ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> rejectAsk(String reason) {
+        System.out.println("[ASK] Rejected (400): " + reason);
+        return ResponseEntity.badRequest().build();
     }
 
     private static List<Map<String, Object>> sanitizeMessages(Object rawMessages) {
