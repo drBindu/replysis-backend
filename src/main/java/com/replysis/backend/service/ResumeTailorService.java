@@ -21,7 +21,9 @@ public class ResumeTailorService {
     private String geminiApiKey;
 
     private final String GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions";
-    private final String GROQ_MODEL   = "llama-3.3-70b-versatile";
+    // llama-3.3-70b-versatile was shut down by Groq on 2026-08-16; gpt-oss-120b
+    // is the replacement they name for it.
+    private final String GROQ_MODEL   = "openai/gpt-oss-120b";
     private final String OPENAI_URL   = "https://api.openai.com/v1/chat/completions";
     private final String OPENAI_MODEL = "gpt-4o";
     private final String GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";

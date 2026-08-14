@@ -48,8 +48,10 @@ public class InterviewController {
 
     private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
-    private static final String DEFAULT_MODEL   = "llama-3.1-8b-instant";
-    private static final String VISION_MODEL_GROQ   = "meta-llama/llama-4-scout-17b-16e-instruct";
+    // Groq shut down llama-3.1-8b-instant on 2026-08-16 and names gpt-oss-20b as
+    // its replacement. Keeping the small, fast model here on purpose: answers
+    // stream while the candidate is still being asked the question.
+    private static final String DEFAULT_MODEL   = "openai/gpt-oss-20b";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
@@ -281,20 +283,26 @@ public class InterviewController {
         if (!provider.equals("groq") && !provider.equals("openai"))
             return rejectScreen("provider not on the allow-list");
 
-        String endpoint = provider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
-        String apiKey   = provider.equals("openai") ? openAiApiKey    : groqApiKey;
-        String model    = provider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+        // Vision runs on OpenAI whatever the caller asks for. Groq's vision model
+        // (llama-4-scout) was retired on 2026-07-17 and now answers
+        // model_not_found, so honouring a "groq" request here only bought a
+        // guaranteed failure and a wasted round trip before the fallback. Restore
+        // provider choice once a Groq vision model is confirmed available.
+        String endpoint = OPENAI_ENDPOINT;
+        String apiKey   = openAiApiKey;
+        String model    = VISION_MODEL_OPENAI;
 
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("No API key for provider: " + provider);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
-        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
-        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
-        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
-        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
-        String fallbackModel    = fallbackProvider.equals("openai") ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+        // One retry against the same provider. This used to fall back to Groq,
+        // which for vision meant retrying into a model that no longer exists.
+        String fallbackProvider = "openai";
+        String fallbackEndpoint = OPENAI_ENDPOINT;
+        String fallbackApiKey   = openAiApiKey;
+        String fallbackModel    = VISION_MODEL_OPENAI;
 
         final String finalImage  = image;
         final String finalPrompt = prompt;

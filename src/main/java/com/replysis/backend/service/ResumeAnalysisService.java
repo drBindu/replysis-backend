@@ -62,7 +62,9 @@ public class ResumeAnalysisService {
         factory.setReadTimeout(30_000);
         RestTemplate rt = new RestTemplate(factory);
         Map<String, Object> body = new HashMap<>();
-        body.put("model", "llama-3.1-8b-instant");
+        // llama-3.1-8b-instant was shut down by Groq on 2026-08-16; gpt-oss-20b
+        // is the replacement they name for it.
+        body.put("model", "openai/gpt-oss-20b");
         body.put("temperature", 0.1);
         body.put("max_tokens", 1_000);
         body.put("messages", List.of(Map.of("role","system","content",sys), Map.of("role","user","content",user)));
