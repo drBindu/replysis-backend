@@ -19,9 +19,15 @@ public class FirestoreCreditsService {
     private static final int GUEST_FREE_CREDITS = 100;
     private static final String ANON_COLLECTION = "anon_devices";
 
+    // Must match PLAN_MONTHLY_CREDITS in the website's app/api/stt/tokens/route.ts.
+    // A plan missing here is normalised to "free", so an unlisted paid tier is
+    // silently downgraded to the free allowance. "max" was missing, which meant a
+    // Max subscriber was metered as a free user.
     private static final Map<String, Integer> PLAN_MONTHLY_CREDITS = Map.of(
             "free", 100,
-            "pro", 5_000,
+            "pro", 2_000,
+            "max", 5_000,
+            // Retired plans, kept so an existing subscriber keeps their allowance.
             "lifetime", 5_000,
             "teams", 10_000
     );
@@ -45,7 +51,10 @@ public class FirestoreCreditsService {
                 if (resetAt == null) {
                     tx.update(ref, "creditsResetDate", nextResetDate());
                 } else if (!Instant.now().isBefore(resetAt)) {
-                    credits = monthlyCredits(plan);
+                    // Top-up packs are bought outright and must survive the monthly
+                    // refill. Resetting to the plan cap alone silently destroyed
+                    // credits the customer had already paid for.
+                    credits = monthlyCredits(plan) + readLong(snap, "purchasedCredits");
                     tx.update(ref,
                             "credits", credits,
                             "creditsUsed", 0,
@@ -91,7 +100,8 @@ public class FirestoreCreditsService {
                 boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
 
                 if (resetNeeded) {
-                    credits = monthlyCredits(plan);
+                    // Same as getCredits: purchased top-ups survive the refill.
+                    credits = monthlyCredits(plan) + readLong(snap, "purchasedCredits");
                     creditsUsed = 0;
                 }
 
@@ -330,7 +340,10 @@ public class FirestoreCreditsService {
 
     private static boolean isUnlimitedPlan(String plan) {
         String normalized = normalizePlan(plan);
-        return "pro".equals(normalized) || "lifetime".equals(normalized) || "teams".equals(normalized);
+        // Every paid tier is unlimited on the desktop path. Omitting "max" gave the
+        // highest-paying tier worse treatment than Pro.
+        return "pro".equals(normalized) || "max".equals(normalized)
+                || "lifetime".equals(normalized) || "teams".equals(normalized);
     }
 
     private static long readCredits(DocumentSnapshot snap) {
