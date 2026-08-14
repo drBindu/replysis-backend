@@ -53,6 +53,14 @@ public class InterviewController {
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
+    // The screen-analysis prompt is not user-typed text — it is a fixed template
+    // the app builds itself (problem/approach/code/tests/complexity/explanation
+    // sections for coding and system-design screens). Measured at ~6,445 chars
+    // and growing as sections are added, it was silently rejected by the 4,000
+    // char question ceiling: every screen analysis request failed with a 400
+    // and no log line, because MAX_QUESTION_CHARS was reused here instead of a
+    // limit sized for what this endpoint actually receives.
+    private static final int    MAX_SCREEN_PROMPT_CHARS = 20_000;
     private static final int    MAX_RESUME_CHARS = 30_000;
     // Abuse ceilings, not size targets. The client's system message carries the
     // resume (up to MAX_RESUME_CHARS) plus locked facts and format rules, so it
@@ -259,14 +267,19 @@ public class InterviewController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
         String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
-        String prompt = text(payload.get("prompt"), MAX_QUESTION_CHARS);
+        String prompt = text(payload.get("prompt"), MAX_SCREEN_PROMPT_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
-        if (providerInput == null) return ResponseEntity.badRequest().build();
+        if (providerInput == null) return rejectScreen("provider field was not usable text");
         final String provider = providerInput.isBlank() ? "groq" : providerInput.toLowerCase();
 
-        if (image == null || image.isBlank() || prompt == null || prompt.isBlank()
-                || !isBase64(image) || (!provider.equals("groq") && !provider.equals("openai")))
-            return ResponseEntity.badRequest().build();
+        if (image == null || image.isBlank())
+            return rejectScreen("image missing, blank, not valid base64, or longer than " + MAX_IMAGE_BASE64_CHARS + " chars");
+        if (prompt == null || prompt.isBlank())
+            return rejectScreen("prompt missing, blank, or longer than " + MAX_SCREEN_PROMPT_CHARS + " chars");
+        if (!isBase64(image))
+            return rejectScreen("image was not valid base64");
+        if (!provider.equals("groq") && !provider.equals("openai"))
+            return rejectScreen("provider not on the allow-list");
 
         String endpoint = provider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
         String apiKey   = provider.equals("openai") ? openAiApiKey    : groqApiKey;
@@ -388,6 +401,17 @@ public class InterviewController {
      */
     private static ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> rejectAsk(String reason) {
         System.out.println("[ASK] Rejected (400): " + reason);
+        return ResponseEntity.badRequest().build();
+    }
+
+    /**
+     * Same purpose as rejectAsk: a 400 here used to return with no trace at all,
+     * so a screen-analysis request could fail with every retry looking identical
+     * from the outside. This is exactly what let MAX_QUESTION_CHARS silently
+     * reject every real prompt for as long as it did.
+     */
+    private static ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody> rejectScreen(String reason) {
+        System.out.println("[ANALYZE_SCREEN] Rejected (400): " + reason);
         return ResponseEntity.badRequest().build();
     }
 
