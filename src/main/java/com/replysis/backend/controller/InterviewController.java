@@ -496,7 +496,7 @@ public class InterviewController {
     private HttpResponse<java.io.InputStream> callAiProvider(
             String endpoint, String apiKey, String model, List<?> messages) throws Exception {
 
-        var aiPayload = Map.of(
+        var aiPayload = new java.util.HashMap<String, Object>(Map.of(
             "model",             model,
             "messages",          messages,
             "temperature",       0.2,
@@ -505,7 +505,18 @@ public class InterviewController {
             "top_p",             0.95,
             "frequency_penalty", 0.3,
             "presence_penalty",  0.15
-        );
+        ));
+
+        // gpt-oss streams a hidden "reasoning" field before any answer text, and
+        // it is billed against max_tokens. Measured on the default setting: the
+        // first word of the answer arrived 372 chunks in, and the answer itself
+        // was cut short because reasoning had spent the budget. On "low" it
+        // starts at chunk 30 and returns roughly 2.6x more answer for the same
+        // tokens. This path exists to put words on screen while the candidate is
+        // still being asked, so the trade is worth it.
+        if (model.startsWith("openai/gpt-oss")) {
+            aiPayload.put("reasoning_effort", "low");
+        }
 
         String body = mapper.writeValueAsString(aiPayload);
 
