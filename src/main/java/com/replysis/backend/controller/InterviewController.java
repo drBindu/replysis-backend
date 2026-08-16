@@ -320,7 +320,7 @@ public class InterviewController {
             boolean providerAccepted = false;
             boolean answerDelivered = false;
             try {
-                List<Map<String, Object>> messages = buildVisionMessages(provider, finalImage, finalPrompt);
+                List<Map<String, Object>> messages = buildVisionMessages(finalImage, finalPrompt);
 
                 HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
 
@@ -332,13 +332,12 @@ public class InterviewController {
                     response = callVisionProvider(endpoint, apiKey, model, messages);
                 }
 
-                // Still failing — fall back to the other configured provider, rebuilding
-                // the messages array in that provider's expected shape.
+                // Still failing — one last attempt. Both paths are OpenAI now, so
+                // the same messages are reused rather than rebuilt.
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode()
                             + ", falling back to " + fallbackProvider);
-                    List<Map<String, Object>> fallbackMessages = buildVisionMessages(fallbackProvider, finalImage, finalPrompt);
-                    response = callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, fallbackMessages);
+                    response = callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
                 }
 
                 if (response.statusCode() != 200) {
@@ -457,10 +456,23 @@ public class InterviewController {
         return true;
     }
 
-    private List<Map<String, Object>> buildVisionMessages(String provider, String base64Image, String prompt) {
-        Map<String, Object> imageUrl = provider.equals("openai")
-                ? Map.of("url", "data:image/png;base64," + base64Image, "detail", "high")
-                : Map.of("url", "data:image/png;base64," + base64Image);
+    /// Builds the vision request body.
+    ///
+    /// The detail flag is not optional for this product. Without it OpenAI
+    /// decides for itself how closely to look, and the thing being sent is a
+    /// screenshot of a coding problem, where the difference between reading and
+    /// guessing is a few pixels per character. "high" makes it tile the image and
+    /// read all of it.
+    ///
+    /// It used to be attached only when the caller asked for "openai". That test
+    /// stopped meaning anything when vision was pinned to OpenAI regardless of
+    /// what the caller asked for, and the desktop app defaults to asking for
+    /// "groq", so in practice almost every screenshot was sent without it. The
+    /// flag now follows where the request actually goes, not what the caller
+    /// named.
+    private List<Map<String, Object>> buildVisionMessages(String base64Image, String prompt) {
+        Map<String, Object> imageUrl =
+                Map.of("url", "data:image/png;base64," + base64Image, "detail", "high");
 
         Map<String, Object> imageContent = Map.of("type", "image_url", "image_url", imageUrl);
         Map<String, Object> textContent  = Map.of("type", "text", "text", prompt);
