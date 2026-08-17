@@ -221,34 +221,21 @@ public class InterviewController {
 
                 providerAccepted = true;
 
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(response.body()))) {
-                    StringBuilder opening = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (line.startsWith("data: ")) {
-                            if (hasContentToken(line)) {
-                                answerDelivered = true;
-                                if (opening.length() < REFUSAL_PROBE_CHARS) opening.append(contentToken(line));
-                            }
-                            outputStream.write((line + "\n\n").getBytes());
-                            outputStream.flush();
-                        }
-                    }
+                // A refusal must never reach the person waiting to speak. It is
+                // held back, the question is asked again without the framing the
+                // model objected to, and only the real answer is sent.
+                //
+                // Doing this here rather than in the app means it costs one
+                // credit instead of two, and it covers the builds already
+                // installed, which cannot retry and were showing the apology.
+                answerDelivered = streamUnlessRefused(response, outputStream);
 
-                    // A refusal is a delivered answer as far as this stream can
-                    // tell, and it is not one the user asked for or can use, so
-                    // it is refunded like any other failure.
-                    //
-                    // On the vision path that was expensive. A declined request
-                    // was billed, the client asked again in plainer words, and
-                    // that was billed too: two credits for one answer, and the
-                    // answer kept was the second. Charging for a refusal is wrong
-                    // on its own terms anyway, whether or not anything retries.
-                    if (looksLikeRefusal(opening.toString())) {
-                        System.out.println("[AI] Model declined; refunding this request.");
-                        answerDelivered = false;
-                    }
+                if (!answerDelivered) {
+                    System.out.println("[AI] Model declined; asking again in plainer words.");
+                    HttpResponse<java.io.InputStream> retry =
+                            callAiProvider(endpoint, apiKey, model, plainRetryMessages(aiMessages));
+                    if (retry.statusCode() == 200)
+                        answerDelivered = streamUnlessRefused(retry, outputStream);
                 }
             } catch (Exception e) {
                 System.err.println("Stream error: " + e.getMessage());
@@ -367,34 +354,22 @@ public class InterviewController {
 
                 providerAccepted = true;
 
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(response.body()))) {
-                    StringBuilder opening = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        if (line.startsWith("data: ")) {
-                            if (hasContentToken(line)) {
-                                answerDelivered = true;
-                                if (opening.length() < REFUSAL_PROBE_CHARS) opening.append(contentToken(line));
-                            }
-                            outputStream.write((line + "\n\n").getBytes());
-                            outputStream.flush();
-                        }
-                    }
+                // A refusal must never reach the person waiting to speak. It is
+                // held back, the question is asked again without the framing the
+                // model objected to, and only the real answer is sent.
+                //
+                // Doing this here rather than in the app means it costs one
+                // credit instead of two, and it covers the builds already
+                // installed, which cannot retry and were showing the apology.
+                answerDelivered = streamUnlessRefused(response, outputStream);
 
-                    // A refusal is a delivered answer as far as this stream can
-                    // tell, and it is not one the user asked for or can use, so
-                    // it is refunded like any other failure.
-                    //
-                    // On the vision path that was expensive. A declined request
-                    // was billed, the client asked again in plainer words, and
-                    // that was billed too: two credits for one answer, and the
-                    // answer kept was the second. Charging for a refusal is wrong
-                    // on its own terms anyway, whether or not anything retries.
-                    if (looksLikeRefusal(opening.toString())) {
-                        System.out.println("[AI] Model declined; refunding this request.");
-                        answerDelivered = false;
-                    }
+                if (!answerDelivered) {
+                    System.out.println("[VISION] Model declined; asking again in plainer words.");
+                    List<Map<String, Object>> plain = buildVisionMessages(finalImage, PLAIN_VISION_PROMPT);
+                    HttpResponse<java.io.InputStream> retry =
+                            callVisionProvider(endpoint, apiKey, model, plain);
+                    if (retry.statusCode() == 200)
+                        answerDelivered = streamUnlessRefused(retry, outputStream);
                 }
             } catch (Exception e) {
                 System.err.println("Screen analysis stream error: " + e.getMessage());
@@ -593,8 +568,104 @@ public class InterviewController {
     // ── Helper: SSE chunk shaped like a normal answer token ─────────────────
     // Used when every provider is unavailable, so the AI Answer box shows a
     // graceful in-character message instead of a raw "AI service error" banner.
+    /**
+     * Streams one provider response, holding the opening back long enough to
+     * tell whether the model is declining.
+     *
+     * A refusal has to be caught before any of it reaches the user, and it can
+     * only be recognised once some of the answer has arrived, so the first few
+     * lines are buffered rather than forwarded. If the answer is real those
+     * lines are released immediately and the rest flows straight through; if it
+     * is a refusal nothing is written and the caller gets to ask again. The held
+     * back portion is tens of characters, which at streaming speed is not a
+     * visible pause.
+     *
+     * Returns true when an answer was delivered, false when the model declined
+     * or said nothing.
+     */
+    private boolean streamUnlessRefused(HttpResponse<java.io.InputStream> response,
+                                        java.io.OutputStream outputStream) throws Exception {
+        StringBuilder opening = new StringBuilder();
+        List<String> held = new java.util.ArrayList<>();
+        boolean released = false, delivered = false;
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data: ")) continue;
+
+                if (released) {
+                    if (hasContentToken(line)) delivered = true;
+                    outputStream.write((line + "\n\n").getBytes());
+                    outputStream.flush();
+                    continue;
+                }
+
+                held.add(line);
+                if (hasContentToken(line)) {
+                    delivered = true;
+                    opening.append(contentToken(line));
+                }
+                if (opening.length() < REFUSAL_PROBE_CHARS) continue;
+
+                if (looksLikeRefusal(opening.toString())) return false;
+
+                released = true;
+                for (String h : held) outputStream.write((h + "\n\n").getBytes());
+                outputStream.flush();
+                held.clear();
+            }
+        }
+
+        // Ended before the probe filled, so nothing has been written yet.
+        if (!released) {
+            if (looksLikeRefusal(opening.toString())) return false;
+            for (String h : held) outputStream.write((h + "\n\n").getBytes());
+            outputStream.flush();
+        }
+        return delivered;
+    }
+
+    /**
+     * The same request stripped of everything a model can object to: the role
+     * play, the interview framing, the instructions about who is speaking. Used
+     * only after a refusal, because that framing is what was refused, and an
+     * answer in a plainer voice beats an apology.
+     */
+    private List<Map<String, Object>> plainRetryMessages(List<?> original) {
+        String question = "";
+        for (Object m : original) {
+            if (m instanceof Map<?, ?> msg && "user".equals(String.valueOf(msg.get("role")))) {
+                question = String.valueOf(msg.get("content"));
+            }
+        }
+        return List.of(
+            Map.of("role", "system", "content",
+                   "Answer the question directly and helpfully, in the first person, "
+                 + "in two to four spoken sentences. Plain text, no headings."),
+            Map.of("role", "user", "content", question));
+    }
+
     /** How much of the answer to read before deciding it is a refusal. */
     private static final int REFUSAL_PROBE_CHARS = 64;
+
+    /**
+     * The screen request stripped of everything a model can object to. Used only
+     * after a refusal, because the framing is what was refused, and an answer in
+     * a plainer voice beats an apology to someone who has to speak in a moment.
+     */
+    private static final String PLAIN_VISION_PROMPT =
+            "The image is a screenshot of the user's own screen. Describe what is on it "
+          + "and answer any question visible in it.\n\n"
+          + "Reply in this shape:\n\n"
+          + "SAY THIS\n"
+          + "The answer in the first person, two to four sentences, ready to read aloud.\n\n"
+          + "DETAIL\n"
+          + "Code, numbers or steps only if the answer needs them. Complete, never abbreviated.\n\n"
+          + "SCREEN NOTES\n"
+          + "One line listing what is visible: window name, menu and tab labels, buttons, "
+          + "headings, figures. Facts only, comma separated.\n\n"
+          + "Use only what is visible. Never claim you cannot see the image. Plain text.";
 
     private static final String[] REFUSAL_OPENINGS = {
         "i'm sorry", "i am sorry", "sorry, i can", "sorry, but i",
