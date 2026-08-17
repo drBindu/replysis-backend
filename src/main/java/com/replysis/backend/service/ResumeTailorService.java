@@ -214,6 +214,11 @@ public class ResumeTailorService {
             body.put("model", GROQ_MODEL);
             body.put("temperature", 0.3);
             body.put("max_tokens", 3000);
+            // Reasoning is billed against max_tokens here too, and a tailored
+            // resume truncated halfway is worse than a slow one: it parses as a
+            // failure and the user is charged for it.
+            body.put("reasoning_effort", "low");
+            body.put("include_reasoning", false);
             body.put("messages", List.of(
                 Map.of("role", "system", "content", sys),
                 Map.of("role", "user",   "content", user)

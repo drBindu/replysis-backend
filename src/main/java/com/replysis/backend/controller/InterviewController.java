@@ -526,8 +526,19 @@ public class InterviewController {
         // starts at chunk 30 and returns roughly 2.6x more answer for the same
         // tokens. This path exists to put words on screen while the candidate is
         // still being asked, so the trade is worth it.
+        // "low" was as far as reasoning_effort goes on gpt-oss, and it still
+        // reasons: 30 chunks of it before the first word of the answer. Turning
+        // the stream off outright is a separate switch, and it is the one that
+        // matters here, because the wait a candidate feels is the wait before
+        // words appear, not the rate they appear at afterwards.
+        //
+        // Which is why gpt-oss felt slower than the llama-instant it replaced
+        // despite being the faster model on paper: 1,000 tokens a second against
+        // 560, spent thinking where nobody could see it. Throughput was never the
+        // number to optimise for a person waiting to speak.
         if (model.startsWith("openai/gpt-oss")) {
             aiPayload.put("reasoning_effort", "low");
+            aiPayload.put("include_reasoning", false);
         }
 
         String body = mapper.writeValueAsString(aiPayload);

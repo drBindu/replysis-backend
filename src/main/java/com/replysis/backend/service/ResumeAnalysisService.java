@@ -67,6 +67,14 @@ public class ResumeAnalysisService {
         body.put("model", "openai/gpt-oss-20b");
         body.put("temperature", 0.1);
         body.put("max_tokens", 1_000);
+        // gpt-oss reasons before it answers and bills that reasoning against
+        // max_tokens, so on the default setting a analysis could spend most of
+        // its thousand tokens thinking and return truncated JSON, which parses
+        // as a failure rather than as a short answer. This service replaced a
+        // model that did not reason and kept its budget, so nothing here was
+        // ever sized for it.
+        body.put("reasoning_effort", "low");
+        body.put("include_reasoning", false);
         body.put("messages", List.of(Map.of("role","system","content",sys), Map.of("role","user","content",user)));
 
         HttpHeaders h = new HttpHeaders();
