@@ -223,13 +223,31 @@ public class InterviewController {
 
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body()))) {
+                    StringBuilder opening = new StringBuilder();
                     String line;
                     while ((line = reader.readLine()) != null) {
                         if (line.startsWith("data: ")) {
-                            if (hasContentToken(line)) answerDelivered = true;
+                            if (hasContentToken(line)) {
+                                answerDelivered = true;
+                                if (opening.length() < REFUSAL_PROBE_CHARS) opening.append(contentToken(line));
+                            }
                             outputStream.write((line + "\n\n").getBytes());
                             outputStream.flush();
                         }
+                    }
+
+                    // A refusal is a delivered answer as far as this stream can
+                    // tell, and it is not one the user asked for or can use, so
+                    // it is refunded like any other failure.
+                    //
+                    // On the vision path that was expensive. A declined request
+                    // was billed, the client asked again in plainer words, and
+                    // that was billed too: two credits for one answer, and the
+                    // answer kept was the second. Charging for a refusal is wrong
+                    // on its own terms anyway, whether or not anything retries.
+                    if (looksLikeRefusal(opening.toString())) {
+                        System.out.println("[AI] Model declined; refunding this request.");
+                        answerDelivered = false;
                     }
                 }
             } catch (Exception e) {
@@ -351,13 +369,31 @@ public class InterviewController {
 
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body()))) {
+                    StringBuilder opening = new StringBuilder();
                     String line;
                     while ((line = reader.readLine()) != null) {
                         if (line.startsWith("data: ")) {
-                            if (hasContentToken(line)) answerDelivered = true;
+                            if (hasContentToken(line)) {
+                                answerDelivered = true;
+                                if (opening.length() < REFUSAL_PROBE_CHARS) opening.append(contentToken(line));
+                            }
                             outputStream.write((line + "\n\n").getBytes());
                             outputStream.flush();
                         }
+                    }
+
+                    // A refusal is a delivered answer as far as this stream can
+                    // tell, and it is not one the user asked for or can use, so
+                    // it is refunded like any other failure.
+                    //
+                    // On the vision path that was expensive. A declined request
+                    // was billed, the client asked again in plainer words, and
+                    // that was billed too: two credits for one answer, and the
+                    // answer kept was the second. Charging for a refusal is wrong
+                    // on its own terms anyway, whether or not anything retries.
+                    if (looksLikeRefusal(opening.toString())) {
+                        System.out.println("[AI] Model declined; refunding this request.");
+                        answerDelivered = false;
                     }
                 }
             } catch (Exception e) {
@@ -557,6 +593,35 @@ public class InterviewController {
     // ── Helper: SSE chunk shaped like a normal answer token ─────────────────
     // Used when every provider is unavailable, so the AI Answer box shows a
     // graceful in-character message instead of a raw "AI service error" banner.
+    /** How much of the answer to read before deciding it is a refusal. */
+    private static final int REFUSAL_PROBE_CHARS = 64;
+
+    private static final String[] REFUSAL_OPENINGS = {
+        "i'm sorry", "i am sorry", "sorry, i can", "sorry, but i",
+        "i can't help", "i cannot help", "i can't assist", "i cannot assist",
+        "i'm not able to help", "i am unable to help", "i won't be able to help"
+    };
+
+    /** Whether an answer opens by declining. Refusals are short and start at the very beginning. */
+    private static boolean looksLikeRefusal(String opening) {
+        if (opening == null || opening.isBlank()) return false;
+        String o = opening.stripLeading().toLowerCase();
+        for (String r : REFUSAL_OPENINGS) if (o.startsWith(r)) return true;
+        return false;
+    }
+
+    /** The text carried by one SSE delta, or "" when the line carries none. */
+    private String contentToken(String sseLine) {
+        try {
+            String data = sseLine.substring("data: ".length()).trim();
+            JsonNode choices = mapper.readTree(data).path("choices");
+            if (!choices.isArray() || choices.isEmpty()) return "";
+            return choices.get(0).path("delta").path("content").asText("");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private boolean hasContentToken(String sseLine) {
         try {
             if (sseLine == null || !sseLine.startsWith("data: ")) return false;
