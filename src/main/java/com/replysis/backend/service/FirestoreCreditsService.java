@@ -373,12 +373,25 @@ public class FirestoreCreditsService {
         return PLAN_MONTHLY_CREDITS.getOrDefault(normalizePlan(plan), 100);
     }
 
+    /**
+     * Whether a plan is exempt from metering. Nothing is, any more.
+     *
+     * Every paid tier used to be unlimited on the desktop path, decided before
+     * there were customers and before the website committed to numbers. The
+     * website has since sold Pro as 2,000 credits a month and Max as 5,000, and
+     * enforces exactly that, while the desktop app handed the same subscriber an
+     * unlimited allowance and showed an infinity symbol where the balance goes.
+     *
+     * Two prices for the same plan depending on which of your own apps someone
+     * opens is not a generosity worth keeping. It makes the pricing page untrue,
+     * it hides usage from the person paying for it, and it leaves no honest way
+     * to tell a heavy user they have reached a limit that was never applied.
+     *
+     * The plan caps here already matched the website exactly. Only this bypass
+     * disagreed.
+     */
     private static boolean isUnlimitedPlan(String plan) {
-        String normalized = normalizePlan(plan);
-        // Every paid tier is unlimited on the desktop path. Omitting "max" gave the
-        // highest-paying tier worse treatment than Pro.
-        return "pro".equals(normalized) || "max".equals(normalized)
-                || "lifetime".equals(normalized) || "teams".equals(normalized);
+        return false;
     }
 
     private static long readCredits(DocumentSnapshot snap) {
