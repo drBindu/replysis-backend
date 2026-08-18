@@ -83,6 +83,10 @@ public class FirestoreCreditsService {
     }
 
     public boolean deductCredits(String uid, int cost) {
+        // Set inside the transaction, read after it. A transaction body can run
+        // more than once on contention, so this records what the last attempt did.
+        final java.util.concurrent.atomic.AtomicBoolean charged =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
         if (cost < 0) return false;
         try {
             Firestore db = FirestoreClient.getFirestore();
@@ -93,7 +97,7 @@ public class FirestoreCreditsService {
                 if (!snap.exists()) return false;
 
                 String plan = normalizePlan(snap.getString("plan"));
-                if (isUnlimitedPlan(plan)) return true;
+                if (isUnlimitedPlan(plan)) { charged.set(false); return true; }
                 long credits = readCredits(snap);
                 long creditsUsed = readLong(snap, "creditsUsed");
                 Instant resetAt = readResetDate(snap);
@@ -123,8 +127,16 @@ public class FirestoreCreditsService {
                 return true;
             }).get();
 
+            // "Allowed to proceed" and "credits were taken" are different facts,
+            // and the log reported the first as though it were the second. An
+            // unlimited plan is allowed and charged nothing, so every request on
+            // one printed "Credits deducted: cost=5" against an account whose
+            // balance never moved, which makes the log useless for the one
+            // question worth asking it: was this user actually charged.
             if (deducted) {
-                System.out.println("Credits deducted: uid=" + uid + " cost=" + cost);
+                System.out.println(charged.get()
+                        ? "Credits deducted: uid=" + uid + " cost=" + cost
+                        : "Allowed with no charge (unlimited plan): uid=" + uid);
             }
             return deducted;
         } catch (Exception e) {
