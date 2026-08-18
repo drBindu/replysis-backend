@@ -64,7 +64,7 @@ public class FirestoreCreditsService {
                 return new UserCredits(safeInt(credits), plan, false);
             }).get();
         } catch (Exception e) {
-            System.err.println("Firestore getCredits error: " + e.getMessage());
+            System.err.println("Firestore getCredits error: " + describe(e));
             return new UserCredits(0, "free", false);
         }
     }
@@ -128,9 +128,32 @@ public class FirestoreCreditsService {
             }
             return deducted;
         } catch (Exception e) {
-            System.err.println("Firestore deductCredits error: " + e.getMessage());
+            System.err.println("Firestore deductCredits error: " + describe(e));
             return false;
         }
+    }
+
+    /**
+     * A failure description that actually identifies the failure.
+     *
+     * Every catch here logged e.getMessage() alone, and a good number of
+     * exceptions carry no message: an ExecutionException wrapping a cause, a
+     * NullPointerException from a field that was absent. The first refund
+     * failure this service ever recorded printed "Firestore refundCredits
+     * error: null", which says a refund was lost and nothing about why.
+     *
+     * A refund failing means a user was charged for something they did not
+     * get, so it is the last place to be economical with detail.
+     */
+    private static String describe(Throwable e) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable t = e; t != null && sb.length() < 600; t = t.getCause()) {
+            if (sb.length() > 0) sb.append("  <- ");
+            sb.append(t.getClass().getSimpleName());
+            if (t.getMessage() != null) sb.append(": ").append(t.getMessage());
+            if (t.getCause() == t) break;
+        }
+        return sb.toString();
     }
 
     public void refundCredits(String uid) {
@@ -171,7 +194,7 @@ public class FirestoreCreditsService {
             }).get();
             System.out.println("Credits refunded: uid=" + uid + " amount=" + cost);
         } catch (Exception e) {
-            System.err.println("Firestore refundCredits error: " + e.getMessage());
+            System.err.println("Firestore refundCredits error: " + describe(e));
         }
     }
 
@@ -200,7 +223,7 @@ public class FirestoreCreditsService {
                 return new UserCredits(safeInt(credits), "guest", false);
             }).get();
         } catch (Exception e) {
-            System.err.println("Firestore getGuestCredits error: " + e.getMessage());
+            System.err.println("Firestore getGuestCredits error: " + describe(e));
             return new UserCredits(0, "guest", false);
         }
     }
@@ -274,7 +297,7 @@ public class FirestoreCreditsService {
             }
             return deducted;
         } catch (Exception e) {
-            System.err.println("Firestore deductGuestCredits error: " + e.getMessage());
+            System.err.println("Firestore deductGuestCredits error: " + describe(e));
             return false;
         }
     }
@@ -315,7 +338,7 @@ public class FirestoreCreditsService {
             }).get();
             System.out.println("Guest credits refunded: device=" + deviceId + " amount=" + cost);
         } catch (Exception e) {
-            System.err.println("Firestore refundGuestCredits error: " + e.getMessage());
+            System.err.println("Firestore refundGuestCredits error: " + describe(e));
         }
     }
 
