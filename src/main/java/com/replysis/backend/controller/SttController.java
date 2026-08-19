@@ -102,6 +102,19 @@ public class SttController {
                     .body(Map.of("error", "No credits remaining"));
         }
 
+        // 3b. Listening time is the cost credits never saw. Speechmatics bills by
+        //     the hour, so a microphone left open costs money whether or not a
+        //     single question is asked. Checked here because this is the only
+        //     door to transcription: no token, no audio, no bill.
+        boolean hasAudioTime = identity.isGuest()
+                ? creditsService.hasGuestAudioTimeLeft(identity.deviceId())
+                : creditsService.hasAudioTimeLeft(identity.uid());
+        if (!hasAudioTime) {
+            return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
+                    .body(Map.of("error", "You have used all your listening time this month.",
+                                 "reason", "audio-limit"));
+        }
+
         // 4. Check the master key is configured on the server
         if (speechmaticsApiKey == null || speechmaticsApiKey.isBlank()) {
             System.err.println("[STT] SPEECHMATICS_API_KEY env var is not set — returning 503");

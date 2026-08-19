@@ -32,6 +32,149 @@ public class FirestoreCreditsService {
             "teams", 10_000
     );
 
+    // ══════════════════════════════════════════════════════════════════════
+    // LISTENING TIME
+    //
+    // Credits meter questions. Speechmatics bills by the hour of audio, and
+    // nothing measured that, so the two costs that matter were disconnected:
+    // somebody could hold the microphone open all afternoon, ask five
+    // questions, spend twenty-five credits, and cost real money.
+    //
+    // Worse, the ordinary case was already thin. A Max plan is five thousand
+    // credits, which is a thousand questions, which at the usual twenty
+    // questions an hour is about fifty hours of audio: roughly the price of
+    // the plan, before Stripe's cut. It survived only because most people
+    // never finish what they bought.
+    //
+    // An hourly allowance sits beside the credits and is checked in the same
+    // places. It is deliberately generous, because it exists to stop the
+    // extreme case and not to be felt by anyone real: thirty hours is more
+    // interviewing than almost anyone does in a month.
+    // ══════════════════════════════════════════════════════════════════════
+    private static final Map<String, Integer> PLAN_MONTHLY_AUDIO_MINUTES = Map.of(
+            "free",       60,      //  1 hour
+            "pro",       900,      // 15 hours
+            "max",     1_800,      // 30 hours
+            "lifetime",1_800,
+            "teams",   6_000       // 100 hours, shared across the team
+    );
+
+    private static final int GUEST_FREE_AUDIO_MINUTES = 30;
+
+    public static int monthlyAudioMinutes(String plan) {
+        return PLAN_MONTHLY_AUDIO_MINUTES.getOrDefault(normalizePlan(plan),
+               PLAN_MONTHLY_AUDIO_MINUTES.get("free"));
+    }
+
+    /**
+     * Adds listening time to this month's total and says whether the caller is
+     * still inside their allowance.
+     *
+     * Clients report minutes as they listen rather than at the end, so a
+     * crashed app, a closed laptop or a dropped connection still leaves the
+     * time accounted for. Reporting late and reporting nothing look identical
+     * from here, and the second one is what a bill is made of.
+     */
+    public AudioUsage addListeningMinutes(String uid, int minutes) {
+        if (minutes < 0) minutes = 0;
+        // A single report cannot be worth more than a long interview. Guards
+        // against a client with a broken clock donating someone else's month.
+        if (minutes > 120) minutes = 120;
+
+        final int add = minutes;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection("users").document(uid);
+
+            return db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                if (!snap.exists()) return new AudioUsage(0, monthlyAudioMinutes("free"), false, "free");
+
+                String plan = normalizePlan(snap.getString("plan"));
+                int allowance = monthlyAudioMinutes(plan);
+
+                // Shares the credits reset date, so a user's month is one month
+                // rather than two that drift apart and confuse everybody.
+                long used = readLong(snap, "audioMinutesUsed");
+                Instant resetAt = readResetDate(snap);
+                if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
+
+                used += add;
+                tx.update(ref, "audioMinutesUsed", used);
+
+                boolean unlimited = isUnlimitedPlan(plan);
+                return new AudioUsage(safeInt(used), allowance, unlimited, plan);
+            }).get();
+        } catch (Exception e) {
+            System.err.println("Firestore addListeningMinutes error: " + describe(e));
+            // Never block someone mid-interview because Firestore hiccuped.
+            return new AudioUsage(0, monthlyAudioMinutes("free"), false, "free");
+        }
+    }
+
+    /**
+     * The same meter for a device that has not signed in. Guests get half an
+     * hour, which is enough to try the product properly and not enough to be
+     * worth farming with fresh device ids.
+     */
+    public AudioUsage addGuestListeningMinutes(String deviceId, int minutes) {
+        if (minutes < 0) minutes = 0;
+        if (minutes > 120) minutes = 120;
+
+        final int add = minutes;
+        try {
+            Firestore db = FirestoreClient.getFirestore();
+            DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);
+
+            return db.runTransaction(tx -> {
+                DocumentSnapshot snap = tx.get(ref).get();
+                long used = snap.exists() ? readLong(snap, "audioMinutesUsed") : 0;
+
+                Instant resetAt = snap.exists() ? readResetDate(snap) : null;
+                if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
+
+                used += add;
+                if (snap.exists()) tx.update(ref, "audioMinutesUsed", used);
+                else tx.set(ref, Map.of("audioMinutesUsed", used,
+                                        "creditsResetDate", nextResetDate()));
+
+                return new AudioUsage(safeInt(used), GUEST_FREE_AUDIO_MINUTES, false, "guest");
+            }).get();
+        } catch (Exception e) {
+            System.err.println("Firestore addGuestListeningMinutes error: " + describe(e));
+            return new AudioUsage(0, GUEST_FREE_AUDIO_MINUTES, false, "guest");
+        }
+    }
+
+    public boolean hasGuestAudioTimeLeft(String deviceId) {
+        AudioUsage usage = addGuestListeningMinutes(deviceId, 0);
+        return usage.usedMinutes < usage.allowanceMinutes;
+    }
+
+    /** True while the caller still has listening time left this month. */
+    public boolean hasAudioTimeLeft(String uid) {
+        AudioUsage usage = addListeningMinutes(uid, 0);
+        return usage.isUnlimited || usage.usedMinutes < usage.allowanceMinutes;
+    }
+
+    public static class AudioUsage {
+        public final int usedMinutes;
+        public final int allowanceMinutes;
+        public final boolean isUnlimited;
+        public final String plan;
+
+        public AudioUsage(int usedMinutes, int allowanceMinutes, boolean isUnlimited, String plan) {
+            this.usedMinutes = usedMinutes;
+            this.allowanceMinutes = allowanceMinutes;
+            this.isUnlimited = isUnlimited;
+            this.plan = plan;
+        }
+
+        public int remainingMinutes() {
+            return isUnlimited ? Integer.MAX_VALUE : Math.max(0, allowanceMinutes - usedMinutes);
+        }
+    }
+
     public UserCredits getCredits(String uid) {
         try {
             Firestore db = FirestoreClient.getFirestore();
