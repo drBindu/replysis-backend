@@ -199,8 +199,10 @@ public class InterviewController {
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
                 if (response.statusCode() == 429 || response.statusCode() >= 500) {
-                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
-                    Thread.sleep(1200);
+                    long waitMs = retryDelayMs(response);
+                    System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
+                            + ", retrying in " + waitMs + "ms");
+                    Thread.sleep(waitMs);
                     response = callAiProvider(endpoint, apiKey, model, messages);
                 }
 
@@ -332,8 +334,10 @@ public class InterviewController {
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
                 if (response.statusCode() == 429 || response.statusCode() >= 500) {
-                    System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode() + ", retrying once");
-                    Thread.sleep(1200);
+                    long waitMs = retryDelayMs(response);
+                    System.err.println("Vision provider " + provider + " returned HTTP "
+                            + response.statusCode() + ", retrying in " + waitMs + "ms");
+                    Thread.sleep(waitMs);
                     response = callVisionProvider(endpoint, apiKey, model, messages);
                 }
 
@@ -706,6 +710,64 @@ public class InterviewController {
             return !content.isBlank();
         } catch (Exception ignored) {
             return false;
+        }
+    }
+
+    /**
+     * How long to wait before retrying a provider that just refused.
+     *
+     * A flat 1200ms was guesswork, and on Groq's free tier it is often too
+     * short: the token bucket refills at about 133 a second, an interview
+     * prompt is around 2,600 tokens, and a drained bucket therefore needs
+     * closer to twenty seconds than one. The retry fired early, failed again,
+     * and fell through to the other provider for nothing.
+     *
+     * Both Groq and OpenAI say how long to wait, in Retry-After or in the
+     * x-ratelimit-reset-* headers. Asking is better than guessing.
+     *
+     * Capped at eight seconds. Somebody is sitting in an interview waiting to
+     * speak, and past that point a slower answer stops being an answer.
+     */
+    private static long retryDelayMs(HttpResponse<?> response) {
+        long fromHeader = Math.max(
+                headerDelayMs(response, "retry-after"),
+                Math.max(headerDelayMs(response, "x-ratelimit-reset-tokens"),
+                         headerDelayMs(response, "x-ratelimit-reset-requests")));
+
+        if (fromHeader <= 0) return 1_200L;              // no guidance: the old default
+        return Math.min(Math.max(fromHeader + 150L, 300L), 8_000L);
+    }
+
+    /**
+     * Reads a delay header. Retry-After is whole seconds; the rate-limit reset
+     * headers use a compact duration such as "547ms", "1.5s" or "2m59.56s".
+     */
+    private static long headerDelayMs(HttpResponse<?> response, String name) {
+        String raw = response.headers().firstValue(name).orElse("").trim();
+        if (raw.isEmpty()) return -1;
+
+        try {
+            if (raw.matches("[0-9]+")) return Long.parseLong(raw) * 1_000L;   // Retry-After, seconds
+
+            double ms = 0;
+            var matcher = java.util.regex.Pattern
+                    .compile("([0-9]*[.]?[0-9]+)(ms|s|m|h)")
+                    .matcher(raw);
+            boolean found = false;
+            while (matcher.find()) {
+                found = true;
+                double value = Double.parseDouble(matcher.group(1));
+                ms += switch (matcher.group(2)) {
+                    case "ms" -> value;
+                    case "s"  -> value * 1_000;
+                    case "m"  -> value * 60_000;
+                    case "h"  -> value * 3_600_000;
+                    default   -> 0;
+                };
+            }
+            return found ? (long) ms : -1;
+        } catch (Exception ignored) {
+            return -1;
         }
     }
 
