@@ -327,6 +327,99 @@ public class InterviewController {
 
     // ── POST /api/v1/interview/analyze-screen ────────────────────────────────
     // Vision analysis: verify token → check credits → call vision model → deduct → return
+    // ══════════════════════════════════════════════════════════════════════
+    // THE SCREENSHOT, SENT BEFORE THE QUESTION
+    //
+    // Measured on a real capture: 1,483ms from the candidate stopping speaking
+    // to the first word appearing, of which the model was 720ms. Most of the
+    // rest was the picture going up the wire, and it goes twice — to here, and
+    // from here to the model.
+    //
+    // The app already takes the screenshot before the question is asked, so it
+    // can send it then too, while nobody is waiting. What is left on the path
+    // when the question finally arrives is an id.
+    //
+    // Held in memory only, briefly. A screenshot is the most personal thing
+    // this product ever handles: it is whatever was on someone's screen. It is
+    // never written to disk, never logged, readable only by the identity that
+    // sent it, and gone in ninety seconds whether it was used or not.
+    // ══════════════════════════════════════════════════════════════════════
+    private static final long   STASHED_IMAGE_TTL_MS = 90_000;
+    private static final int    MAX_STASHED_IMAGES   = 200;
+
+    private record StashedImage(String owner, String base64, long expiresAt) {}
+
+    private final java.util.Map<String, StashedImage> stashedImages =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    @PostMapping("/screen-cache")
+    public ResponseEntity<?> stashScreenshot(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            HttpServletRequest request,
+            @RequestBody Map<String, Object> payload) {
+
+        RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
+        if (identity == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        // Same ceiling as a real screen request. This costs no credits and calls
+        // no model, but it does hold memory, so it is not a free-for-all.
+        if (!allowExpensiveRequest(identity, request, "screen-cache"))
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+
+        String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
+        if (image == null || image.isBlank() || !isBase64(image))
+            return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
+
+        sweepStashedImages();
+        if (stashedImages.size() >= MAX_STASHED_IMAGES)
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Map.of("error", "too many screenshots held right now"));
+
+        String id = java.util.UUID.randomUUID().toString();
+        stashedImages.put(id, new StashedImage(identityKey(identity), image,
+                System.currentTimeMillis() + STASHED_IMAGE_TTL_MS));
+
+        return ResponseEntity.ok(Map.of("imageId", id, "expiresInMs", STASHED_IMAGE_TTL_MS));
+    }
+
+    /**
+     * The stashed image, if this caller is the one who stashed it.
+     *
+     * Taken rather than read: an id is good for one question. That keeps a
+     * leaked id worthless a moment later, and stops a stale screen being
+     * answered twice.
+     */
+    private String takeStashedImage(String id, RequestIdentity identity) {
+        if (id == null || id.isBlank()) return null;
+        sweepStashedImages();
+
+        StashedImage held = stashedImages.get(id);
+        if (held == null) return null;
+
+        // Ownership decides, not the id. Ids are guessable in principle and
+        // screenshots are not something to hand to whoever asks.
+        if (!held.owner().equals(identityKey(identity))) return null;
+        if (System.currentTimeMillis() > held.expiresAt()) {
+            stashedImages.remove(id);
+            return null;
+        }
+
+        stashedImages.remove(id);
+        return held.base64();
+    }
+
+    /** Same shape the rate limiter already uses, so one caller means one caller. */
+    private static String identityKey(RequestIdentity identity) {
+        return identity.isGuest() ? "guest:" + identity.deviceId() : "user:" + identity.uid();
+    }
+
+    private void sweepStashedImages() {
+        long now = System.currentTimeMillis();
+        stashedImages.entrySet().removeIf(e -> now > e.getValue().expiresAt());
+    }
+
     @PostMapping(value = "/analyze-screen", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<StreamingResponseBody> analyzeScreen(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
@@ -341,14 +434,27 @@ public class InterviewController {
         if (!allowExpensiveRequest(identity, request, "vision"))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
-        String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
+        // An id from a screenshot already sent, or the bytes inline as before.
+        // Older builds send only the bytes and must keep working.
+        String imageId = textOrEmpty(payload.get("imageId"), 64);
+        String stashed = takeStashedImage(imageId, identity);
+
+        String image = stashed != null
+                ? stashed
+                : text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
         String prompt = text(payload.get("prompt"), MAX_SCREEN_PROMPT_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
         if (providerInput == null) return rejectScreen("provider field was not usable text");
         final String provider = providerInput.isBlank() ? "groq" : providerInput.toLowerCase();
 
-        if (image == null || image.isBlank())
+        if (image == null || image.isBlank()) {
+            // An id that resolved to nothing is worth naming: it means the
+            // screenshot expired, or was already used, and the app should have
+            // sent the bytes instead.
+            if (imageId != null && !imageId.isBlank())
+                return rejectScreen("imageId was unknown, expired, already used, or not yours");
             return rejectScreen("image missing, blank, not valid base64, or longer than " + MAX_IMAGE_BASE64_CHARS + " chars");
+        }
         if (prompt == null || prompt.isBlank())
             return rejectScreen("prompt missing, blank, or longer than " + MAX_SCREEN_PROMPT_CHARS + " chars");
         if (!isBase64(image))
