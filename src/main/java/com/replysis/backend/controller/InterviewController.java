@@ -344,6 +344,7 @@ public class InterviewController {
     // never written to disk, never logged, readable only by the identity that
     // sent it, and gone in ninety seconds whether it was used or not.
     // ══════════════════════════════════════════════════════════════════════
+    private static final int    SCREEN_CACHE_PER_MINUTE = 40;
     private static final long   STASHED_IMAGE_TTL_MS = 90_000;
     private static final int    MAX_STASHED_IMAGES   = 200;
 
@@ -365,7 +366,23 @@ public class InterviewController {
 
         // Same ceiling as a real screen request. This costs no credits and calls
         // no model, but it does hold memory, so it is not a free-for-all.
-        if (!allowExpensiveRequest(identity, request, "screen-cache"))
+        // Its own allowance, well above the one for a real request.
+        //
+        // This was sharing the twelve-a-minute ceiling meant for calls that
+        // spend credits and reach a model. Sending a screenshot ahead does
+        // neither: it is a memory write with a ninety-second life. The app
+        // prepares one every couple of seconds while watching a screen, so the
+        // shared ceiling rejected most of them, the question fell back to
+        // carrying the picture inline, and the whole point of sending it early
+        // was lost — measured at 1,461ms to the first word, right back where it
+        // started.
+        //
+        // Forty a minute is more than the app can produce and still small
+        // enough to bound the memory, which is what the ceiling is protecting.
+        if (!rateLimiter.tryAcquire("screen-cache:ip:" + rateLimiter.clientIp(request),
+                                    SCREEN_CACHE_PER_MINUTE * 4, 60_000L)
+                || !rateLimiter.tryAcquire("screen-cache:identity:" + identityKey(identity),
+                                    SCREEN_CACHE_PER_MINUTE, 60_000L))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
         String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
