@@ -282,7 +282,9 @@ public class InterviewController {
 
                 if (response.statusCode() != 200) {
                     System.err.println("AI error: HTTP " + response.statusCode());
-                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.write(response.statusCode() == 429
+                            ? rateLimitedEvent(response).getBytes()
+                            : friendlyErrorEvent().getBytes());
                     outputStream.flush();
                     return;
                 }
@@ -630,7 +632,9 @@ public class InterviewController {
 
                 if (response.statusCode() != 200) {
                     System.err.println("Vision AI error: HTTP " + response.statusCode());
-                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.write(response.statusCode() == 429
+                            ? rateLimitedEvent(response).getBytes()
+                            : friendlyErrorEvent().getBytes());
                     outputStream.flush();
                     return;
                 }
@@ -1205,6 +1209,26 @@ public class InterviewController {
 
     private String friendlyErrorEvent() throws Exception {
         var chunk = Map.of("error", "The AI service is temporarily unavailable. Please try again.");
+        return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
+    }
+
+    /**
+     * The same event, but saying which wall was hit and for how long.
+     *
+     * "The AI service is temporarily unavailable" is true and useless. A rate
+     * limit is not an outage: nothing is broken, the allowance for this minute
+     * is spent, and it returns on its own. Somebody testing needs to know
+     * whether to wait or to start debugging, and those are opposite actions —
+     * a morning was spent looking for a fault that was never there.
+     */
+    private String rateLimitedEvent(HttpResponse<?> response) throws Exception {
+        long waitMs = retryDelayMs(response);
+        long seconds = Math.max(1, Math.round(waitMs / 1000.0));
+
+        var chunk = Map.of("error",
+                "This minute's AI allowance is used up. Nothing is broken — it refills every "
+                + "minute. Try again in about " + seconds + " seconds. Reading a screen costs "
+                + "far more than a spoken question, so screen answers run out first.");
         return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
 
