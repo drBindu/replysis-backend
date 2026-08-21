@@ -52,6 +52,10 @@ public class InterviewController {
     // its replacement. Keeping the small, fast model here on purpose: answers
     // stream while the candidate is still being asked the question.
     private static final String DEFAULT_MODEL   = "openai/gpt-oss-20b";
+
+    // The second Groq budget. Groq's rate limit is per model, so this is a
+    // whole separate allowance on the same key, not a share of one.
+    private static final String SECOND_CHOICE_MODEL = "openai/gpt-oss-120b";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
@@ -170,12 +174,46 @@ public class InterviewController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
-        // Alternate provider — used as a fallback if the primary is rate-limited/unavailable.
-        // The SAME aiMessages are reused, so conversation context/prompt stays identical either way.
-        String fallbackProvider = provider.equals("openai") ? "groq" : "openai";
-        String fallbackEndpoint = fallbackProvider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
-        String fallbackApiKey   = fallbackProvider.equals("openai") ? openAiApiKey    : groqApiKey;
-        String fallbackModel    = fallbackProvider.equals("openai") ? "gpt-4o"        : DEFAULT_MODEL;
+        // Alternate model — used when the primary is rate-limited or unavailable.
+        // The SAME aiMessages are reused, so conversation context stays identical.
+        //
+        // The fallback used to be the other provider, which assumed OpenAI was
+        // always there. It was not: a key with billing switched off answers
+        // every request with 402, so a Groq rate limit became a hard failure and
+        // the candidate read "The AI service is temporarily unavailable" while
+        // an interviewer waited.
+        //
+        // Groq meters tokens per model, not per account. Measured on the live
+        // key: draining gpt-oss-20b to 5,185 remaining left gpt-oss-120b
+        // untouched at 7,927. So the larger model is a real second budget on
+        // the same free tier, and a better answer besides.
+        //
+        // Falling back within Groq first therefore costs nothing, needs no
+        // billing, and turns most rate limits into a slightly slower answer
+        // rather than none. OpenAI stays as the third try for whoever has it,
+        // and is skipped without a word when the key is missing or inactive.
+        String fallbackProvider;
+        String fallbackEndpoint;
+        String fallbackApiKey;
+        String fallbackModel;
+
+        if (provider.equals("openai")) {
+            fallbackProvider = "groq";
+            fallbackEndpoint = GROQ_ENDPOINT;
+            fallbackApiKey   = groqApiKey;
+            fallbackModel    = DEFAULT_MODEL;
+        } else {
+            fallbackProvider = "groq";
+            fallbackEndpoint = GROQ_ENDPOINT;
+            fallbackApiKey   = groqApiKey;
+            fallbackModel    = SECOND_CHOICE_MODEL;
+        }
+
+        // Third try, only for a key that actually works. Reached when both Groq
+        // models are limited, which needs 16,000 tokens inside one minute.
+        String lastResortEndpoint = OPENAI_ENDPOINT;
+        String lastResortApiKey   = openAiApiKey;
+        String lastResortModel    = "gpt-4o";
 
         // 6. Charge UP FRONT (atomic). Deducting after the AI answered meant a
         //    failed deduction still served a free answer; charging first closes
@@ -206,12 +244,25 @@ public class InterviewController {
                     response = callAiProvider(endpoint, apiKey, model, messages);
                 }
 
-                // Still failing — fall back to the other configured provider with the SAME
-                // messages, so the user gets a real answer instead of a raw error.
+                // Second try: the other Groq model, which has its own token
+                // budget. Same messages, so the answer is built from identical
+                // context either way.
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
-                            + ", falling back to " + fallbackProvider);
+                            + ", falling back to " + fallbackProvider + "/" + fallbackModel);
                     response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                }
+
+                // Third try: OpenAI, for accounts that have it. Skipped in
+                // silence when the key is absent, which is the normal case
+                // before anyone has set up billing, and must not be treated as
+                // an error worth logging on every request.
+                if (response.statusCode() != 200
+                        && lastResortApiKey != null && !lastResortApiKey.isBlank()
+                        && !lastResortEndpoint.equals(fallbackEndpoint)) {
+                    System.err.println("Both Groq models returned HTTP " + response.statusCode()
+                            + ", trying openai/" + lastResortModel);
+                    response = callAiProvider(lastResortEndpoint, lastResortApiKey, lastResortModel, messages);
                 }
 
                 if (response.statusCode() != 200) {
