@@ -572,8 +572,15 @@ public class InterviewController {
                 // It also spreads the load. Groq meters per model, so the two
                 // stages draw on separate allowances rather than racing each
                 // other for one.
-                String screenRead = readScreenForCoding(
-                        endpoint, apiKey, model, finalImages, finalPrompt);
+                String screenRead;
+                try {
+                    screenRead = readScreenForCoding(
+                            endpoint, apiKey, model, finalImages, finalPrompt);
+                } catch (RateLimitedException limited) {
+                    outputStream.write(rateLimitedEvent(limited.response).getBytes());
+                    outputStream.flush();
+                    return;
+                }
 
                 if (screenRead != null && !screenRead.isBlank()) {
                     HttpResponse<java.io.InputStream> coded = callAiProvider(
@@ -1145,6 +1152,13 @@ public class InterviewController {
                     endpoint, apiKey, model, buildVisionMessages(images, extract));
             if (res.statusCode() != 200) {
                 System.err.println("Screen read failed: HTTP " + res.statusCode());
+
+                // A rate limit is not worth trying around. The caller's fallback
+                // is the same model on the same key, so it fails identically,
+                // after an eight second retry, and the person waiting has spent
+                // sixteen seconds to be told the same thing they would have been
+                // told at once. Say so immediately.
+                if (res.statusCode() == 429) throw new RateLimitedException(res);
                 return null;
             }
 
@@ -1205,6 +1219,12 @@ public class InterviewController {
                 Map.of("role", "user", "content",
                         "What is on the screen:\n\n" + screenRead
                         + "\n\nWhat they asked:\n" + originalPrompt));
+    }
+
+    /** Carries the provider's own headers, so the wait can be reported honestly. */
+    private static class RateLimitedException extends RuntimeException {
+        final transient HttpResponse<?> response;
+        RateLimitedException(HttpResponse<?> response) { this.response = response; }
     }
 
     private String friendlyErrorEvent() throws Exception {
