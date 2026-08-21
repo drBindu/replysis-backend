@@ -566,6 +566,25 @@ public class InterviewController {
                     response = callVisionProvider(endpoint, apiKey, model, messages);
                 }
 
+                // Too large. Three views of a scrolled problem is roughly a
+                // megabyte and a half of base64, and the provider refuses it
+                // outright with a 413 — which then fell through to the other
+                // provider, whose account was inactive, and the candidate read
+                // "temporarily unavailable" with an interviewer waiting.
+                //
+                // Dropping to the newest view alone is the right retreat. It is
+                // the screen they are looking at now, so the answer is about the
+                // right thing even when it cannot see everything they scrolled
+                // past. Half the context beats none of it.
+                if (response.statusCode() == 413 && finalImages.size() > 1) {
+                    System.err.println("Vision payload too large with " + finalImages.size()
+                            + " views; retrying with the newest one only.");
+                    List<Map<String, Object>> justLatest = buildVisionMessages(
+                            List.of(finalImages.get(finalImages.size() - 1)), finalPrompt);
+                    response = callVisionProvider(endpoint, apiKey, model, justLatest);
+                    messages = justLatest;
+                }
+
                 // Still failing — one last attempt. Both paths are OpenAI now, so
                 // the same messages are reused rather than rebuilt.
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
