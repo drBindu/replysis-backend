@@ -1222,12 +1222,29 @@ public class InterviewController {
      * a morning was spent looking for a fault that was never there.
      */
     private String rateLimitedEvent(HttpResponse<?> response) throws Exception {
-        long waitMs = retryDelayMs(response);
-        long seconds = Math.max(1, Math.round(waitMs / 1000.0));
+        // Read the wait from the headers, and refuse to believe a tiny one.
+        //
+        // The first version printed "try again in about 1 seconds", which is
+        // worse than saying nothing: the caller waits a second, fails again,
+        // and now distrusts the message as well as the app. It came from the
+        // default fallback, because a real 429 does not carry the header the
+        // retry logic reads.
+        //
+        // The bucket refills at a sixtieth of the limit per second, and a
+        // screen question needs around 1,800 tokens, so an empty bucket is
+        // closer to a quarter of a minute than to one second. Anything under
+        // fifteen seconds is treated as no useful guidance rather than as good
+        // news.
+        long headerMs = Math.max(
+                headerDelayMs(response, "x-ratelimit-reset-tokens"),
+                headerDelayMs(response, "retry-after"));
+
+        long seconds = headerMs > 0 ? Math.round(headerMs / 1000.0) : 0;
+        if (seconds < 15) seconds = 30;   // no usable header: a fair middle estimate
 
         var chunk = Map.of("error",
                 "This minute's AI allowance is used up. Nothing is broken — it refills every "
-                + "minute. Try again in about " + seconds + " seconds. Reading a screen costs "
+                + "minute. Wait about " + seconds + " seconds and ask again. Reading a screen costs "
                 + "far more than a spoken question, so screen answers run out first.");
         return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
