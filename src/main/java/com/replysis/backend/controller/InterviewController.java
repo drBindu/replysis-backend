@@ -552,6 +552,41 @@ public class InterviewController {
             boolean providerAccepted = false;
             boolean answerDelivered = false;
             try {
+                // Reading the screen and writing the code are different jobs.
+                //
+                // The vision model can do the first and cannot reliably do the
+                // second. Asked to fix an LRU Cache it produced, across three
+                // attempts, three different implementations, each broken in a
+                // new way — one declaring "Node head, tail;" as objects and then
+                // using head->nxt on them, which does not compile. It is a 27B
+                // model reading pixels; correct C++ for a data structure problem
+                // is not what it is for.
+                //
+                // So the screen is read by the model that can see, and the code
+                // is written by the model that can code. gpt-oss-120b never sees
+                // the image: it gets a description of the problem and the error,
+                // which is all it needs and a fraction of the tokens.
+                //
+                // It also spreads the load. Groq meters per model, so the two
+                // stages draw on separate allowances rather than racing each
+                // other for one.
+                String screenRead = readScreenForCoding(
+                        endpoint, apiKey, model, finalImages, finalPrompt);
+
+                if (screenRead != null && !screenRead.isBlank()) {
+                    HttpResponse<java.io.InputStream> coded = callAiProvider(
+                            GROQ_ENDPOINT, groqApiKey, SECOND_CHOICE_MODEL,
+                            codingMessages(screenRead, finalPrompt));
+
+                    if (coded.statusCode() == 200) {
+                        providerAccepted = true;
+                        answerDelivered = streamUnlessRefused(coded, outputStream);
+                        if (answerDelivered) return;
+                    }
+                    System.err.println("Coding stage unusable (HTTP " + coded.statusCode()
+                            + "); falling back to the vision model writing it.");
+                }
+
                 List<Map<String, Object>> messages = buildVisionMessages(finalImages, finalPrompt);
 
                 HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
@@ -1056,6 +1091,116 @@ public class InterviewController {
         } catch (Exception ignored) {
             return -1;
         }
+    }
+
+    /**
+     * Only coding screens are worth two stages.
+     *
+     * "What is on my screen" and "read this error to me" are answered perfectly
+     * well by the model that can see it, and a second call there would be a
+     * second charge for nothing.
+     */
+    private static final String[] CODING_MARKERS = {
+        "solve", "code", "implement", "function", "algorithm", "complexity",
+        "compile", "error", "test case", "fix", "debug", "leetcode",
+    };
+
+    private static boolean looksLikeCoding(String prompt) {
+        if (prompt == null) return false;
+        String p = prompt.toLowerCase();
+        for (String marker : CODING_MARKERS) if (p.contains(marker)) return true;
+        return false;
+    }
+
+    /**
+     * Stage one: what is on the screen, in words, so a text model can work from
+     * it. Short on purpose — the description is an input to the next call, not
+     * something anybody reads.
+     */
+    private String readScreenForCoding(String endpoint, String apiKey, String model,
+                                       List<String> images, String prompt) {
+        if (!looksLikeCoding(prompt)) return null;
+
+        try {
+            String extract = """
+                Read this screen and report it. Do not solve anything, do not write code.
+
+                PROBLEM: the exact title and the full statement as written, including
+                every example and constraint you can see. Copy the wording; do not
+                summarise it.
+                LANGUAGE: the language selected in the editor.
+                EXISTING CODE: the code currently in the editor, exactly as written,
+                or "none".
+                ERROR: any compile error, failed test or red message, with the exact
+                line number and text, or "none".
+                ASKED: what the interviewer just asked, in one line.
+
+                Plain text under these five headings. Nothing else.""";
+
+            HttpResponse<java.io.InputStream> res = callVisionProvider(
+                    endpoint, apiKey, model, buildVisionMessages(images, extract));
+            if (res.statusCode() != 200) {
+                System.err.println("Screen read failed: HTTP " + res.statusCode());
+                return null;
+            }
+
+            var text = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(res.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data: ")) continue;
+                    String token = contentToken(line.substring(6).trim());
+                    if (token != null) text.append(token);
+                    if (text.length() > 8_000) break;
+                }
+            }
+            return text.toString().trim();
+        } catch (Exception e) {
+            System.err.println("Screen read error: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Stage two: the answer, written by a model that is good at code and has
+     * never seen the picture.
+     */
+    private List<Map<String, Object>> codingMessages(String screenRead, String originalPrompt) {
+        String system = """
+            You are the candidate in a live coding interview, answering out loud.
+            Someone has read the screen for you and written down what is on it.
+            Answer from that as if you were looking at it yourself. Never mention
+            the description, the screen, or that anything was read to you.
+
+            Answer in this shape and nothing else:
+
+            SAY THIS
+            Two to four sentences, first person, ready to say out loud. If there is
+            an error, lead with it: what it is, which line, and what fixes it.
+            Otherwise lead with the approach and why.
+
+            DETAIL
+            The complete solution, inside a fence: ```language on its own line
+            before it and ``` after.
+
+            The code must compile as written. It is pasted straight into the editor.
+            Give the whole class or function the problem asks for, never a fragment
+            and never one method on its own — a method without its class does not
+            compile, and a candidate pasting it looks worse than one who wrote
+            nothing. Declare every member. Match pointers and objects: a member
+            declared Node* is used with ->, one declared Node is used with a dot,
+            and mixing them is the most common way this goes wrong. Do not use a
+            variable after deleting or erasing it. Keep the exact class and method
+            names the problem gives.
+
+            Then one line: Time O(...), space O(...).""";
+
+        return List.of(
+                Map.of("role", "system", "content", system),
+                Map.of("role", "user", "content",
+                        "What is on the screen:\n\n" + screenRead
+                        + "\n\nWhat they asked:\n" + originalPrompt));
     }
 
     private String friendlyErrorEvent() throws Exception {
