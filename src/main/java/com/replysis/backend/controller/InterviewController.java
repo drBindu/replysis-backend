@@ -57,6 +57,21 @@ public class InterviewController {
     // whole separate allowance on the same key, not a share of one.
     private static final String SECOND_CHOICE_MODEL = "openai/gpt-oss-120b";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
+
+    // Groq has a vision model after all, and it is free on the same key.
+    //
+    // The comment below used to say no Groq vision model existed, and acted on
+    // it: the whole screen path was hard-wired to OpenAI with OpenAI as its own
+    // fallback. When that account lapsed, screen analysis did not degrade, it
+    // died, and there was nothing behind it.
+    //
+    // The model list is not enough to tell. Asking each model for an image is:
+    // compound, compound-mini and gpt-oss all answer "content must be a
+    // string", and qwen3.6-27b answers "image must have at least 2 pixels in
+    // each dimension" — a complaint about the test pixel, which means it read
+    // the image. Given a real one it returns "blue", streams, and accepts
+    // detail:high exactly as the app already sends it.
+    private static final String VISION_MODEL_GROQ = "qwen/qwen3.6-27b";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -346,21 +361,26 @@ public class InterviewController {
         // model_not_found, so honouring a "groq" request here only bought a
         // guaranteed failure and a wasted round trip before the fallback. Restore
         // provider choice once a Groq vision model is confirmed available.
-        String endpoint = OPENAI_ENDPOINT;
-        String apiKey   = openAiApiKey;
-        String model    = VISION_MODEL_OPENAI;
+        // Groq first, because it works and costs nothing. OpenAI behind it for
+        // accounts that have billing: gpt-4o is still the better reader of a
+        // dense screen full of code, and is worth having as the second try.
+        // Assigned once. The streaming lambda below captures these, so they have
+        // to stay effectively final.
+        final boolean primaryIsGroq = groqApiKey != null && !groqApiKey.isBlank();
+
+        String endpoint = primaryIsGroq ? GROQ_ENDPOINT      : OPENAI_ENDPOINT;
+        String apiKey   = primaryIsGroq ? groqApiKey         : openAiApiKey;
+        String model    = primaryIsGroq ? VISION_MODEL_GROQ  : VISION_MODEL_OPENAI;
 
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("No API key for provider: " + provider);
+            System.err.println("No vision API key configured for either provider");
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
-        // One retry against the same provider. This used to fall back to Groq,
-        // which for vision meant retrying into a model that no longer exists.
-        String fallbackProvider = "openai";
-        String fallbackEndpoint = OPENAI_ENDPOINT;
-        String fallbackApiKey   = openAiApiKey;
-        String fallbackModel    = VISION_MODEL_OPENAI;
+        String fallbackProvider = primaryIsGroq ? "openai" : "groq";
+        String fallbackEndpoint = primaryIsGroq ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
+        String fallbackApiKey   = primaryIsGroq ? openAiApiKey    : groqApiKey;
+        String fallbackModel    = primaryIsGroq ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
 
         final String finalImage  = image;
         final String finalPrompt = prompt;
@@ -550,12 +570,23 @@ public class InterviewController {
     private HttpResponse<java.io.InputStream> callVisionProvider(
             String endpoint, String apiKey, String model, List<?> messages) throws Exception {
 
-        var aiPayload = Map.of(
-            "model",      model,
-            "messages",   messages,
-            "max_tokens", 4096,
-            "stream",     true
-        );
+        // Qwen thinks out loud unless told not to, and the whole of it lands in
+        // the content: "<think> The user wants me to identify the colour of the
+        // provided image. 1. Analyze the image:..." That would stream straight
+        // onto the screen in front of an interviewer. Asking for no reasoning
+        // returns the answer alone — "blue" rather than a paragraph about how
+        // it decided.
+        //
+        // Only sent to Groq. OpenAI rejects the field, and a rejected request
+        // here means a blank screen answer.
+        var aiPayload = new java.util.LinkedHashMap<String, Object>();
+        aiPayload.put("model",      model);
+        aiPayload.put("messages",   messages);
+        aiPayload.put("max_tokens", 4096);
+        aiPayload.put("stream",     true);
+        if (endpoint.equals(GROQ_ENDPOINT)) {
+            aiPayload.put("reasoning_effort", "none");
+        }
 
         String body = mapper.writeValueAsString(aiPayload);
 
