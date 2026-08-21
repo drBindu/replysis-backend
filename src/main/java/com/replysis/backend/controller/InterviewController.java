@@ -344,6 +344,9 @@ public class InterviewController {
     // never written to disk, never logged, readable only by the identity that
     // sent it, and gone in ninety seconds whether it was used or not.
     // ══════════════════════════════════════════════════════════════════════
+    // Three views is a scrolled problem statement. More is a screen recording,
+    // and the cost of reading them lands on somebody waiting to speak.
+    private static final int    MAX_IMAGES_PER_QUESTION = 3;
     private static final int    SCREEN_CACHE_PER_MINUTE = 40;
     private static final long   STASHED_IMAGE_TTL_MS = 90_000;
     private static final int    MAX_STASHED_IMAGES   = 200;
@@ -432,6 +435,26 @@ public class InterviewController {
         return identity.isGuest() ? "guest:" + identity.deviceId() : "user:" + identity.uid();
     }
 
+    /**
+     * Every screenshot in the list that this caller stashed and has not used.
+     *
+     * Silently drops any that expired or were already spent rather than failing
+     * the whole request: three views with one missing still answers the
+     * question better than refusing to answer at all.
+     */
+    private List<String> takeStashedImages(Object raw, RequestIdentity identity) {
+        var found = new ArrayList<String>();
+        if (!(raw instanceof List<?> ids)) return found;
+
+        for (Object id : ids) {
+            if (found.size() >= MAX_IMAGES_PER_QUESTION) break;
+            if (!(id instanceof String text) || text.isBlank()) continue;
+            String image = takeStashedImage(text, identity);
+            if (image != null) found.add(image);
+        }
+        return found;
+    }
+
     private void sweepStashedImages() {
         long now = System.currentTimeMillis();
         stashedImages.entrySet().removeIf(e -> now > e.getValue().expiresAt());
@@ -451,13 +474,18 @@ public class InterviewController {
         if (!allowExpensiveRequest(identity, request, "vision"))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
-        // An id from a screenshot already sent, or the bytes inline as before.
+        // Ids of screenshots already sent, or the bytes inline as before.
         // Older builds send only the bytes and must keep working.
-        String imageId = textOrEmpty(payload.get("imageId"), 64);
-        String stashed = takeStashedImage(imageId, identity);
+        List<String> stashedImages = takeStashedImages(payload.get("imageIds"), identity);
 
-        String image = stashed != null
-                ? stashed
+        String imageId = textOrEmpty(payload.get("imageId"), 64);
+        if (stashedImages.isEmpty() && imageId != null && !imageId.isBlank()) {
+            String one = takeStashedImage(imageId, identity);
+            if (one != null) stashedImages = List.of(one);
+        }
+
+        String image = !stashedImages.isEmpty()
+                ? stashedImages.get(0)
                 : text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
         String prompt = text(payload.get("prompt"), MAX_SCREEN_PROMPT_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
@@ -506,6 +534,9 @@ public class InterviewController {
         String fallbackModel    = primaryIsGroq ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
 
         final String finalImage  = image;
+        final List<String> finalImages = stashedImages.isEmpty()
+                ? List.of(image)
+                : List.copyOf(stashedImages);
         final String finalPrompt = prompt;
 
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
@@ -521,7 +552,7 @@ public class InterviewController {
             boolean providerAccepted = false;
             boolean answerDelivered = false;
             try {
-                List<Map<String, Object>> messages = buildVisionMessages(finalImage, finalPrompt);
+                List<Map<String, Object>> messages = buildVisionMessages(finalImages, finalPrompt);
 
                 HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
 
@@ -563,7 +594,7 @@ public class InterviewController {
 
                 if (!answerDelivered) {
                     System.out.println("[VISION] Model declined; asking again in plainer words.");
-                    List<Map<String, Object>> plain = buildVisionMessages(finalImage, PLAIN_VISION_PROMPT);
+                    List<Map<String, Object>> plain = buildVisionMessages(finalImages, PLAIN_VISION_PROMPT);
                     HttpResponse<java.io.InputStream> retry =
                             callVisionProvider(endpoint, apiKey, model, plain);
                     if (retry.statusCode() == 200)
@@ -680,13 +711,45 @@ public class InterviewController {
     /// flag now follows where the request actually goes, not what the caller
     /// named.
     private List<Map<String, Object>> buildVisionMessages(String base64Image, String prompt) {
-        Map<String, Object> imageUrl =
-                Map.of("url", "data:image/png;base64," + base64Image, "detail", "high");
+        return buildVisionMessages(List.of(base64Image), prompt);
+    }
 
-        Map<String, Object> imageContent = Map.of("type", "image_url", "image_url", imageUrl);
-        Map<String, Object> textContent  = Map.of("type", "text", "text", prompt);
+    /**
+     * One question, several pictures of the screen it is written on.
+     *
+     * A coding problem rarely fits on one screen. The candidate scrolls to read
+     * it, and a single screenshot then holds either the statement or the
+     * constraints but never both, so the answer was built from half a question
+     * and there was no way to tell from reading it.
+     *
+     * The app captures while they scroll, keeps the views that differ, and
+     * sends them together. The model is told they are one screen read top to
+     * bottom, in order, so it joins them rather than treating them as three
+     * unrelated pictures.
+     *
+     * Oldest first, because that is the order they were scrolled through and
+     * the order the problem reads in.
+     */
+    private List<Map<String, Object>> buildVisionMessages(List<String> base64Images, String prompt) {
+        var content = new ArrayList<Map<String, Object>>();
 
-        return List.of(Map.of("role", "user", "content", List.of(textContent, imageContent)));
+        String preface = base64Images.size() > 1
+                ? "The " + base64Images.size() + " images below are one screen, "
+                  + "photographed as the user scrolled down it. They are in order, top "
+                  + "to bottom, and they overlap. Read them as a single page: the "
+                  + "question may begin in the first and finish in the last. Never "
+                  + "describe them as separate screens or mention that there is more "
+                  + "than one.\n\n" + prompt
+                : prompt;
+
+        content.add(Map.of("type", "text", "text", preface));
+
+        for (String image : base64Images) {
+            content.add(Map.of("type", "image_url", "image_url",
+                    Map.of("url", "data:image/png;base64," + image, "detail", "high")));
+        }
+
+        return List.of(Map.of("role", "user", "content", content));
     }
 
     // ── Helper: call a vision-capable chat-completions endpoint ───────────────
