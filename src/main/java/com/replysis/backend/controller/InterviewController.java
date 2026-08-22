@@ -251,12 +251,34 @@ public class InterviewController {
 
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
-                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                // A rate limit is not retried on the same model. A server error is.
+                //
+                // Sleeping eight seconds and asking the same model again was the
+                // worst of both: too long to feel responsive, and far too short
+                // to help. The bucket refills at a sixtieth of the limit a
+                // second, so a drained one needs fifteen seconds or more, and
+                // the retry reliably woke up to the same 429. Measured end to
+                // end at about nine seconds before the error appeared — nine
+                // seconds of silence in front of an interviewer, which reads as
+                // a hang rather than a limit.
+                //
+                // The second model exists precisely because Groq meters per
+                // model, so on a 429 it is already the right next move and there
+                // is nothing to wait for. Falling straight through costs one
+                // round trip instead of eight seconds plus one.
+                //
+                // A 5xx is different: it is usually a moment of trouble at the
+                // provider, and the same model a second later often works. That
+                // keeps its backoff.
+                if (response.statusCode() >= 500) {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", retrying in " + waitMs + "ms");
                     Thread.sleep(waitMs);
                     response = callAiProvider(endpoint, apiKey, model, messages);
+                } else if (response.statusCode() == 429) {
+                    System.err.println("Provider " + provider + " rate limited; going straight to "
+                            + fallbackModel + " rather than waiting.");
                 }
 
                 // Second try: the other Groq model, which has its own token
@@ -641,7 +663,9 @@ public class InterviewController {
 
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
-                if (response.statusCode() == 429 || response.statusCode() >= 500) {
+                // Same reasoning as the answer path: a rate limit has nothing to
+                // wait for, a server error does.
+                if (response.statusCode() >= 500) {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Vision provider " + provider + " returned HTTP "
                             + response.statusCode() + ", retrying in " + waitMs + "ms");
@@ -1099,6 +1123,12 @@ public class InterviewController {
      *
      * Capped at eight seconds. Somebody is sitting in an interview waiting to
      * speak, and past that point a slower answer stops being an answer.
+     *
+     * Only reached for 5xx now. A real Groq 429 carries none of these headers,
+     * so on that path this always returned the 1,200ms default and was then
+     * floored to the eight second cap — careful parsing that never once ran in
+     * the case it was written for, and eight seconds of silence to show for it.
+     * Rate limits go straight to the other model instead.
      */
     private static long retryDelayMs(HttpResponse<?> response) {
         long fromHeader = Math.max(
