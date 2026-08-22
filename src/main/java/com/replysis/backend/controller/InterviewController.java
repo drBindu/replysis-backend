@@ -351,7 +351,22 @@ public class InterviewController {
     private static final int    MAX_IMAGES_PER_QUESTION = 3;
     private static final int    SCREEN_CACHE_PER_MINUTE = 40;
     private static final long   STASHED_IMAGE_TTL_MS = 90_000;
-    private static final int    MAX_STASHED_IMAGES   = 200;
+
+    // What the stash may hold, in bytes and per person.
+    //
+    // It was two hundred images with no size limit beyond the eight megabyte
+    // ceiling on a single upload, and no per-user share. Two hundred times
+    // eight megabytes is 1.5 GB against a 1.38 GB heap: one signed-in caller
+    // could exhaust the heap in about five minutes and take the backend down
+    // for everybody. The count was global too, so filling it denied service to
+    // every other user long before memory ran out.
+    //
+    // A real screenshot is around half a megabyte encoded. Two megabytes is
+    // already generous for one, three views is a scrolled problem, and sixty
+    // megabytes across everyone is a fraction of the heap even when full.
+    private static final int    MAX_STASHED_IMAGE_CHARS = 2_000_000;
+    private static final int    MAX_STASHED_PER_IDENTITY = 4;
+    private static final long   MAX_STASHED_TOTAL_BYTES = 60L * 1024 * 1024;
 
     private record StashedImage(String owner, String base64, long expiresAt) {}
 
@@ -394,8 +409,32 @@ public class InterviewController {
         if (image == null || image.isBlank() || !isBase64(image))
             return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
 
+        // Far larger than any real screenshot. Rejected rather than trimmed,
+        // because something sending eight megabytes is not a screen capture.
+        if (image.length() > MAX_STASHED_IMAGE_CHARS)
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "screenshot too large to hold"));
+
         sweepStashedImages();
-        if (stashedImages.size() >= MAX_STASHED_IMAGES)
+
+        String owner = identityKey(identity);
+
+        // One caller's share, so nobody can crowd anyone else out. Their own
+        // oldest goes first: they are the ones who queued too many, and the
+        // newest view is the one their next question needs.
+        var mine = stashedImages.entrySet().stream()
+                .filter(e -> e.getValue().owner().equals(owner))
+                .sorted(java.util.Comparator.comparingLong(e -> e.getValue().expiresAt()))
+                .toList();
+        for (int i = 0; i <= mine.size() - MAX_STASHED_PER_IDENTITY; i++)
+            stashedImages.remove(mine.get(i).getKey());
+
+        // And a ceiling across everyone, measured in bytes rather than count,
+        // because count says nothing about memory.
+        long held = stashedImages.values().stream()
+                .mapToLong(held2 -> held2.base64().length())
+                .sum();
+        if (held + image.length() > MAX_STASHED_TOTAL_BYTES)
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(Map.of("error", "too many screenshots held right now"));
 
