@@ -54,6 +54,31 @@ public class SttController {
     private static final int PER_IDENTITY_PER_HOUR = 12;
     private static final int PER_IP_PER_MINUTE     = 5;
 
+    /**
+     * How many transcription tokens one address may collect for guest trials in
+     * a day.
+     *
+     * The free trial is granted per device, and the device is whatever the
+     * caller puts in X-Device-Id - a header the server cannot verify. Rotating
+     * it yields a fresh trial every time: another 100 credits, and another
+     * thirty minutes of transcription, which is the half that costs real money
+     * at roughly a pound an hour of audio. Every other limit here is per
+     * identity or per minute, so rotating the identity walked around all of
+     * them.
+     *
+     * Capping guest tokens per address closes that without needing to trust the
+     * header. Tokens last an hour and are cached on disk by the client, so a
+     * real guest asks for one or two a day and never reaches twelve; a scripted
+     * farm hits it after twelve and has to find another address for each further
+     * twelve. Signed-in users are not counted here at all - their limit is their
+     * account, which is verified.
+     *
+     * Deliberately generous rather than tight: an office or campus behind one
+     * address may hold several genuine trial users, and turning them away is
+     * worse than the cost of a few extra tokens.
+     */
+    private static final int GUEST_TOKENS_PER_IP_PER_DAY = 12;
+
     @Autowired
     private IdentityResolverService identityResolver;
 
@@ -90,6 +115,20 @@ public class SttController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .header("Retry-After", "60")
                     .body(Map.of("error", "Too many token requests. Please wait a moment."));
+        }
+
+        // The trial is per device, and the device id is unverifiable, so the
+        // ceiling that actually holds is per address. Counted only for guests:
+        // a signed-in account is verified and limited by the account itself.
+        if (identity.isGuest()
+                && !rateLimiter.tryAcquire("stt-guest-ip:" + ip, GUEST_TOKENS_PER_IP_PER_DAY, 86_400_000L)) {
+            System.out.println("[STT] Guest trial ceiling reached for one address; "
+                    + "further guest tokens refused for the day.");
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .header("Retry-After", "3600")
+                    .body(Map.of("error",
+                            "The free trial limit for this network has been reached. "
+                            + "Sign in to keep using Replysis."));
         }
 
         // 3. Transcription is only issued to callers who can still afford to use it —
