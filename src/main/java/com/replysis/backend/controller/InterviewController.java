@@ -46,8 +46,18 @@ public class InterviewController {
     @Value("${openai.api.key:}")
     private String openAiApiKey;
 
+    @Value("${gemini.api.key:}")
+    private String geminiApiKey;
+
     private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+    // Google's OpenAI-compatibility endpoint, not the native generateContent
+    // API. It accepts the exact same {model, messages, stream} shape this file
+    // already builds for Groq and OpenAI — including image_url data URIs and
+    // SSE chunks shaped as data: {"choices":[{"delta":{"content":...}}]} — so
+    // it drops into callVisionProvider/readScreenForCoding with zero format
+    // translation. Verified against this endpoint directly before wiring it in.
+    private static final String GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
     // Groq shut down llama-3.1-8b-instant on 2026-08-16 and names gpt-oss-20b as
     // its replacement. Keeping the small, fast model here on purpose: answers
     // stream while the candidate is still being asked the question.
@@ -72,6 +82,20 @@ public class InterviewController {
     // the image. Given a real one it returns "blue", streams, and accepts
     // detail:high exactly as the app already sends it.
     private static final String VISION_MODEL_GROQ = "qwen/qwen3.6-27b";
+
+    // Primary screen reader as of 2026-08-22. Measured head-to-head against
+    // qwen3.6-27b on a hard synthetic screen (file tree, two compiler errors,
+    // a failing test with expected/actual values, exact line numbers): Gemini
+    // read every fact in 1.46s, qwen recognised the problem shape and answered
+    // from memory instead of reading the red compile error on screen. Also
+    // ~37% fewer prompt tokens and no per-minute ceiling, unlike Groq's free
+    // tier. See MAC_CATCHUP.md for the full comparison.
+    private static final String VISION_MODEL_GEMINI = "gemini-3.1-flash-lite";
+
+    // The spoken-answer model. Same family as the vision one on purpose: it is
+    // the fastest tier Google sells, measured under a second to first token,
+    // which is the number that matters when somebody is waiting to speak.
+    private static final String ANSWER_MODEL_GEMINI = "gemini-3.1-flash-lite";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -180,9 +204,28 @@ public class InterviewController {
         }
 
         // 5. Build AI request
-        String endpoint = provider.equals("openai") ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
-        String apiKey   = provider.equals("openai") ? openAiApiKey    : groqApiKey;
-        String model    = provider.equals("openai") ? "gpt-4o"        : DEFAULT_MODEL;
+        //
+        // Gemini answers first when its key is present, and Groq behind it.
+        //
+        // This used to lead with Groq's free tier and it was failing users
+        // outright, not slowly: measured on one real session, ten requests in
+        // twenty-five minutes produced six rate limits, and once both Groq
+        // models were drained the chain ended at an OpenAI account that has
+        // been inactive since 2026-08-22 — credits deducted, every provider
+        // refused, credits refunded, and the candidate given nothing at all
+        // while an interviewer waited. A free tier metered per minute cannot
+        // carry a paid product's answer path; it can only stand behind one.
+        //
+        // Gemini's limits are per-day rather than per-minute and its flash-lite
+        // tier is both cheaper per token and faster than what it replaces, so
+        // the burst of questions that drained Groq is exactly the shape it
+        // handles best. Groq stays as the fallback: still free, still fast,
+        // and now only reached when Gemini itself is unavailable.
+        final boolean answerOnGemini = geminiApiKey != null && !geminiApiKey.isBlank();
+
+        String endpoint = answerOnGemini ? GEMINI_ENDPOINT       : GROQ_ENDPOINT;
+        String apiKey   = answerOnGemini ? geminiApiKey          : groqApiKey;
+        String model    = answerOnGemini ? ANSWER_MODEL_GEMINI   : DEFAULT_MODEL;
 
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("No API key for provider: " + provider);
@@ -212,7 +255,8 @@ public class InterviewController {
         String fallbackApiKey;
         String fallbackModel;
 
-        if (provider.equals("openai")) {
+        if (answerOnGemini) {
+            // Gemini was primary, so the fallback is the free tier behind it.
             fallbackProvider = "groq";
             fallbackEndpoint = GROQ_ENDPOINT;
             fallbackApiKey   = groqApiKey;
@@ -570,31 +614,43 @@ public class InterviewController {
         if (!provider.equals("groq") && !provider.equals("openai"))
             return rejectScreen("provider not on the allow-list");
 
-        // Vision runs on OpenAI whatever the caller asks for. Groq's vision model
-        // (llama-4-scout) was retired on 2026-07-17 and now answers
-        // model_not_found, so honouring a "groq" request here only bought a
-        // guaranteed failure and a wasted round trip before the fallback. Restore
-        // provider choice once a Groq vision model is confirmed available.
-        // Groq first, because it works and costs nothing. OpenAI behind it for
-        // accounts that have billing: gpt-4o is still the better reader of a
-        // dense screen full of code, and is worth having as the second try.
-        // Assigned once. The streaming lambda below captures these, so they have
-        // to stay effectively final.
-        final boolean primaryIsGroq = groqApiKey != null && !groqApiKey.isBlank();
+        // Vision runs on Gemini whatever the caller asks for, same as it ran on
+        // OpenAI before this change regardless of the "groq" the desktop app
+        // sends — the provider field only gates the allow-list check above, it
+        // has not chosen the real route in some time.
+        //
+        // Gemini first: measured on a hard synthetic screen (file tree, two
+        // compiler errors, a failing test with exact expected/actual values)
+        // it read every fact in 1.46s where qwen3.6-27b recognised the problem
+        // shape and answered from memory instead of reading the compile error
+        // on screen. Verified against the real endpoint before this switch,
+        // including the detail:high field this file always attaches to
+        // image_url — Gemini's OpenAI-compat endpoint ignores it rather than
+        // rejecting it, same as Groq does.
+        //
+        // Groq behind it as the free fallback. OpenAI dropped from the
+        // automatic chain on 2026-08-22: the account came back "account is not
+        // active, please check your billing" on every model tested, confirmed
+        // by calling it directly, not inferred. Re-add a third tier here if
+        // that account is ever reactivated — see MAC_CATCHUP.md.
+        //
+        // Assigned once. The streaming lambda below captures these, so they
+        // have to stay effectively final.
+        final boolean primaryIsGemini = geminiApiKey != null && !geminiApiKey.isBlank();
 
-        String endpoint = primaryIsGroq ? GROQ_ENDPOINT      : OPENAI_ENDPOINT;
-        String apiKey   = primaryIsGroq ? groqApiKey         : openAiApiKey;
-        String model    = primaryIsGroq ? VISION_MODEL_GROQ  : VISION_MODEL_OPENAI;
+        String endpoint = primaryIsGemini ? GEMINI_ENDPOINT     : GROQ_ENDPOINT;
+        String apiKey   = primaryIsGemini ? geminiApiKey        : groqApiKey;
+        String model    = primaryIsGemini ? VISION_MODEL_GEMINI : VISION_MODEL_GROQ;
 
         if (apiKey == null || apiKey.isBlank()) {
             System.err.println("No vision API key configured for either provider");
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
-        String fallbackProvider = primaryIsGroq ? "openai" : "groq";
-        String fallbackEndpoint = primaryIsGroq ? OPENAI_ENDPOINT : GROQ_ENDPOINT;
-        String fallbackApiKey   = primaryIsGroq ? openAiApiKey    : groqApiKey;
-        String fallbackModel    = primaryIsGroq ? VISION_MODEL_OPENAI : VISION_MODEL_GROQ;
+        String fallbackProvider = primaryIsGemini ? "groq" : "gemini";
+        String fallbackEndpoint = primaryIsGemini ? GROQ_ENDPOINT      : GEMINI_ENDPOINT;
+        String fallbackApiKey   = primaryIsGemini ? groqApiKey         : geminiApiKey;
+        String fallbackModel    = primaryIsGemini ? VISION_MODEL_GROQ  : VISION_MODEL_GEMINI;
 
         final String finalImage  = image;
         final List<String> finalImages = stashedImages.isEmpty()
@@ -643,19 +699,88 @@ public class InterviewController {
                     return;
                 }
 
-                if (screenRead != null && !screenRead.isBlank()) {
+                // "none: not a coding screen" is stage one correctly reporting
+                // there was nothing to extract — the screen was a browser tab,
+                // a dashboard, anything ordinary. Sending that on to stage two
+                // forced a coding-interview answer out of a model that never
+                // saw the screen either, for a question that was never about
+                // code. Falling through to the single-stage path below instead
+                // lets the client's own prompt handle it — the one that
+                // already knows how to answer or ignore a screen normally.
+                boolean noCodingProblem = screenRead != null
+                        && screenRead.toLowerCase(java.util.Locale.ROOT).contains("none: not a coding screen");
+
+                // Which of the two paths actually answered is the single most
+                // useful thing in this log and was not recorded anywhere: a
+                // two-stage answer and a single-stage one look identical from
+                // outside, so an answer built by the vision model straight from
+                // the image — where the signature rewrite above cannot reach —
+                // was indistinguishable from one built by the coding model from
+                // rewritten text. Say plainly which ran.
+                System.out.println("[SCREEN_PATH] twoStageEligible="
+                        + (screenRead != null && !screenRead.isBlank() && !noCodingProblem)
+                        + " screenReadNull=" + (screenRead == null)
+                        + " noCodingProblem=" + noCodingProblem);
+
+                // The constraints are not on screen, so the problem continues
+                // below it — say so instead of solving a problem half of which
+                // has not been read.
+                //
+                // This is decided here rather than asked of the coding model,
+                // because asking was measured at roughly half right: given the
+                // identical cut-off screen twice, it said "let me scroll" once
+                // and confidently wrote a full solution the other time. That is
+                // the same failure as the signature bug below — a model asked to
+                // apply a rule applies it sometimes — and the same answer works:
+                // stage one reports a concrete observation ("CONSTRAINTS: not
+                // visible", which it can simply see) and the decision is made in
+                // code, where it happens every time or never.
+                //
+                // Worth being clear about why this matters at all, since the
+                // model will nearly always recognise the problem and produce a
+                // plausible solution anyway: the hidden part is exactly where
+                // an interviewer's version differs from the famous one — a bound
+                // that rules out the obvious approach, a follow-up demanding
+                // O(1) space. A confident answer to the wrong problem is worse
+                // than a three-second pause to scroll.
+                if (screenRead != null && !noCodingProblem
+                        && screenRead.toLowerCase(java.util.Locale.ROOT)
+                                     .contains("constraints: not visible")) {
+                    System.out.println("[SCREEN_PATH] constraints off-screen — asking to scroll");
+                    String ask = "SAY THIS\nLet me scroll down and read the constraints "
+                               + "before I answer.\n\nNEED\nThe constraints section.";
+                    var scrollChunk = Map.of("choices",
+                            List.of(Map.of("delta", Map.of("content", ask))));
+                    outputStream.write(("data: " + mapper.writeValueAsString(scrollChunk) + "\n\n")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    outputStream.write("data: [DONE]\n\n"
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    outputStream.flush();
+                    providerAccepted = true;
+                    answerDelivered = true;
+                    return;
+                }
+
+                if (screenRead != null && !screenRead.isBlank() && !noCodingProblem) {
                     HttpResponse<java.io.InputStream> coded = callAiProvider(
                             GROQ_ENDPOINT, groqApiKey, SECOND_CHOICE_MODEL,
                             codingMessages(screenRead, finalPrompt));
 
                     if (coded.statusCode() == 200) {
                         providerAccepted = true;
-                        answerDelivered = streamUnlessRefused(coded, outputStream);
-                        if (answerDelivered) return;
+                        answerDelivered = streamCodingAnswerCorrected(coded, outputStream);
+                        if (answerDelivered) {
+                            System.out.println("[SCREEN_PATH] answered by TWO-STAGE ("
+                                    + SECOND_CHOICE_MODEL + ")");
+                            return;
+                        }
                     }
                     System.err.println("Coding stage unusable (HTTP " + coded.statusCode()
                             + "); falling back to the vision model writing it.");
                 }
+
+                System.out.println("[SCREEN_PATH] answering by SINGLE-STAGE vision (" + model
+                        + ") — the signature rewrite does not apply on this path");
 
                 List<Map<String, Object>> messages = buildVisionMessages(finalImages, finalPrompt);
 
@@ -925,10 +1050,19 @@ public class InterviewController {
             "temperature",       0.2,
             "max_tokens",        700,
             "stream",            true,
-            "top_p",             0.95,
-            "frequency_penalty", 0.3,
-            "presence_penalty",  0.15
+            "top_p",             0.95
         ));
+
+        // Both penalties are OpenAI/Groq-only. Google's OpenAI-compatibility
+        // endpoint validates strictly rather than ignoring what it does not
+        // know — it answers 400 "Unknown name \"frequency_penalty\": Cannot
+        // find field" and the whole answer fails — so they are added only for
+        // the providers that accept them. Verified against both endpoints
+        // directly before this was wired up.
+        if (!endpoint.equals(GEMINI_ENDPOINT)) {
+            aiPayload.put("frequency_penalty", 0.3);
+            aiPayload.put("presence_penalty",  0.15);
+        }
 
         // gpt-oss streams a hidden "reasoning" field before any answer text, and
         // it is billed against max_tokens. Measured on the default setting: the
@@ -1202,20 +1336,47 @@ public class InterviewController {
         if (!looksLikeCoding(prompt)) return null;
 
         try {
+            // The ASKED line used to be requested with nothing to put in it —
+            // this method never received the real question, only the fixed
+            // template below, so the model filled ASKED in blind or guessed.
+            // actuallyAsked() pulls just the spoken words out of the client's
+            // much larger instructional prompt; see its own comment for why
+            // that distinction matters here specifically.
+            //
+            // "or say so" on PROBLEM is the other half of the same fix. Without
+            // an explicit way to report that there is no coding problem on
+            // screen, a screen that genuinely has none — a pricing dashboard,
+            // a browser tab, anything ordinary — left the model filling five
+            // required headings from nothing to fill them with. Confirmed
+            // live: asked what website was open on a page with no code at
+            // all, it invented a LeetCode problem to have something to report.
             String extract = """
                 Read this screen and report it. Do not solve anything, do not write code.
 
+                The interviewer just asked: %s
+
                 PROBLEM: the exact title and the full statement as written, including
                 every example and constraint you can see. Copy the wording; do not
-                summarise it.
-                LANGUAGE: the language selected in the editor.
+                summarise it. If the screen is not a coding problem, an editor, or an
+                error — a browser tab, a dashboard, anything ordinary — write "none:
+                not a coding screen" and say plainly what the screen actually is
+                instead. Never invent a problem to have one to report.
+                LANGUAGE: the language selected in the editor, or "none".
                 EXISTING CODE: the code currently in the editor, exactly as written,
                 or "none".
                 ERROR: any compile error, failed test or red message, with the exact
                 line number and text, or "none".
-                ASKED: what the interviewer just asked, in one line.
+                CONSTRAINTS: the constraints section of the problem, copied as
+                written — the bounds like "1 <= n <= 10^5". If no constraints
+                section is visible on the screen, write exactly "not visible".
+                Report only what is actually rendered: you will recognise most of
+                these problems and could recite their usual constraints from
+                memory, and doing that here is the one thing that makes this line
+                useless. If you cannot see it, it is not visible.
+                ASKED: repeat back the interviewer's question above, in one line.
 
-                Plain text under these five headings. Nothing else.""";
+                Plain text under these six headings. Nothing else.
+                """.formatted(actuallyAsked(prompt));
 
             HttpResponse<java.io.InputStream> res = callVisionProvider(
                     endpoint, apiKey, model, buildVisionMessages(images, extract));
@@ -1237,12 +1398,37 @@ public class InterviewController {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (!line.startsWith("data: ")) continue;
-                    String token = contentToken(line.substring(6).trim());
+                    // contentToken strips the "data: " prefix itself (same as
+                    // its only other caller, streamUnlessRefused, which passes
+                    // the raw line). This used to strip it again before the
+                    // call, corrupting the JSON on every line and making this
+                    // whole two-stage read-then-code pipeline silently return
+                    // "" forever — every request fell through to the weaker
+                    // single-stage path without ever failing loudly.
+                    String token = contentToken(line);
                     if (token != null) text.append(token);
                     if (text.length() > 8_000) break;
                 }
             }
-            return text.toString().trim();
+            String raw = text.toString().trim();
+            String fixed = fixPointerSignatureIfNeeded(raw);
+
+            // Diagnostic, deliberately loud, added after three fixes for the
+            // same bug each looked correct in testing and then failed on the
+            // user's very next real request. Reasoning about why a real screen
+            // behaves differently from a synthetic one, without being able to
+            // see either the extracted text or whether the rewrite fired, is
+            // what made those three rounds slow: everything downstream of here
+            // was inference. This prints the two facts that end the guessing —
+            // whether the signature rewrite actually ran, and what stage one
+            // actually extracted — and nothing that is not already being sent
+            // to the model anyway.
+            System.out.println("[SCREEN_READ] pointerFixApplied=" + !fixed.equals(raw)
+                    + " chars=" + raw.length());
+            System.out.println("[SCREEN_READ] extract: "
+                    + raw.replace('\n', '|').substring(0, Math.min(700, raw.length())));
+
+            return fixed;
         } catch (Exception e) {
             System.err.println("Screen read error: " + e.getMessage());
             return null;
@@ -1250,9 +1436,284 @@ public class InterviewController {
     }
 
     /**
+     * Streams the coding answer, correcting the signature in the finished text
+     * rather than trusting the model to have written it correctly.
+     *
+     * Every earlier fix for this bug acted on the model's *input* — clearer
+     * instructions, a worked example, and finally rewriting the extracted
+     * screen text before the model ever saw it. Logging added after the third
+     * one still failed showed why none of them could work:
+     * pointerFixApplied=true, answered by TWO-STAGE — the model was handed a
+     * corrected signature and wrote the broken one regardless. Its prior on
+     * "what this LeetCode function looks like" is simply stronger than the
+     * text in front of it, and no amount of input shaping outranks that.
+     *
+     * So this is the last place the defect can be caught: after the model has
+     * finished, before the user sees it. The same mechanical rule as on the
+     * input side — a parameter dereferenced with -> must be declared a pointer,
+     * which is not a matter of taste in any C-family language — applied to the
+     * answer itself.
+     *
+     * The cost is that the answer arrives at once instead of streaming in.
+     * That is a real loss on a path built for speed, and it is accepted here
+     * because the alternative is code that does not compile: a fast wrong
+     * answer helps nobody mid-interview, and the coding model returns a few
+     * hundred tokens in about a second. Refusal detection still happens first,
+     * on the same buffered text, so nothing about that behaviour changes.
+     */
+    private boolean streamCodingAnswerCorrected(HttpResponse<java.io.InputStream> response,
+                                                java.io.OutputStream outputStream) throws Exception {
+        var whole = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(response.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data: ")) continue;
+                String token = contentToken(line);
+                if (token != null) whole.append(token);
+            }
+        }
+
+        String answer = whole.toString();
+        if (answer.isBlank()) return false;
+        if (looksLikeRefusal(answer.substring(0, Math.min(REFUSAL_PROBE_CHARS, answer.length()))))
+            return false;
+
+        String corrected = fixPointerSignatureIfNeeded(answer);
+
+        // Always report the signature the user will actually paste, corrected or
+        // not. Logging only the corrections left the failing case invisible:
+        // when a real answer came back with a value-typed signature and no
+        // correction line beside it, there was no way to tell whether the
+        // rewrite had run and found nothing, or never run at all — and the
+        // difference is the whole bug. One line per answer removes that
+        // ambiguity permanently.
+        String sigBefore = firstSignatureLine(answer);
+        String sigAfter = firstSignatureLine(corrected);
+        System.out.println("[SCREEN_SIG] before=[" + sigBefore + "] after=[" + sigAfter + "]"
+                + " corrected=" + !corrected.equals(answer));
+
+        // A value-typed parameter that is still dereferenced after the rewrite
+        // means the rewrite missed a shape it should have caught. That does not
+        // compile, so it is a defect and not a curiosity — say so loudly enough
+        // that it is found by reading the log rather than by a user pasting it.
+        if (sigAfter.matches(".*\\b(\\w+)\\s+\\w+\\s*\\([^)*]*\\).*")
+                && corrected.contains("->")) {
+            System.out.println("[SCREEN_SIG] WARNING: signature still value-typed after rewrite "
+                    + "— this will not compile: " + sigAfter);
+        }
+
+        var chunk = Map.of("choices",
+                List.of(Map.of("delta", Map.of("content", corrected))));
+        outputStream.write(("data: " + mapper.writeValueAsString(chunk) + "\n\n").getBytes(
+                java.nio.charset.StandardCharsets.UTF_8));
+        outputStream.write("data: [DONE]\n\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        outputStream.flush();
+        return true;
+    }
+
+    // A whole function-signature line: return type, name, parameter list.
+    //
+    // Deliberately per-line and permissive about the parameter list rather than
+    // matching one exact shape. The previous version required the return type
+    // and the single parameter type to be the same word, which held for
+    // "ListNode insertionSortList(ListNode head)" and quietly missed anything
+    // else — a second parameter, a differing return type, a stray qualifier.
+    // Whether a parameter needs a pointer is decided below from how the body
+    // uses it, which is the actual rule; the pattern's only job is to find the
+    // line and split it up.
+    //
+    // The lookahead on the separator group is load-bearing. Without it the
+    // separator may match empty, so a single word splits in two and
+    // "while (curr) {" parses as return type "whil", name "e", parameter
+    // "curr" — and gets rewritten to "whil e(cur* r)", turning working code
+    // into a syntax error. Caught by the control-flow regression tests below
+    // rather than in production, which is the only reason this comment is
+    // shorter than that bug would have been.
+    private static final java.util.regex.Pattern SIGNATURE_LINE =
+            java.util.regex.Pattern.compile(
+                    "(?m)^([ \\t]*)([A-Za-z_]\\w*)((?=[\\s*])\\s*\\**\\s*)([A-Za-z_]\\w*)\\s*\\(([^)]*)\\)(\\s*\\{?[ \\t]*)$");
+
+    /** One "Type name" parameter inside a parameter list. */
+    private static final java.util.regex.Pattern PARAM =
+            java.util.regex.Pattern.compile("^\\s*([A-Za-z_]\\w*)((?=[\\s*])\\s*\\**\\s*)([A-Za-z_]\\w*)\\s*$");
+
+    /**
+     * Corrects a value-typed self-referential parameter to a pointer, before
+     * the code-writing model ever sees it — rather than asking that model to
+     * notice and correct it itself.
+     *
+     * Three attempts at getting gpt-oss-120b to do this by instruction alone
+     * are the reason this exists. An abstract rule ("match pointers and
+     * objects") was satisfied in prose and skipped in code. A worked example
+     * ("this happened, was sent to a real user, and did not compile") passed
+     * four isolated trials in a row and then failed on the very next real
+     * request, with the model once again stating the fix out loud and not
+     * applying it — different session, same exact shape of failure, this
+     * time paired with two claims about the code that were not true either
+     * ("missing a closing brace" on code that had one). Better instructions
+     * were narrowing the failure rate, not closing it, and code that gets
+     * pasted into a compiler during a live interview does not get to fail
+     * occasionally.
+     *
+     * So the fix moved from "ask the model to do it" to "make it already
+     * true before the model sees it." A parameter used with -> that is not
+     * declared as a pointer is not a judgement call — it does not compile in
+     * C, C++, Objective-C, or any language that uses -> for member access,
+     * so there is no case where leaving it alone is the right call. Detecting
+     * that and rewriting the one line is mechanical, not a heuristic, and it
+     * runs on stage one's extraction — text nobody sees — so stage two
+     * receives an already-correct signature and has nothing left to get
+     * wrong here. This does not replace the worked example above; it is the
+     * layer behind it for the cases the model still misses on its own.
+     */
+    private static String fixPointerSignatureIfNeeded(String screenRead) {
+        if (screenRead == null || screenRead.isEmpty()) return screenRead;
+
+        java.util.regex.Matcher m = SIGNATURE_LINE.matcher(screenRead);
+        StringBuilder out = new StringBuilder();
+        int last = 0;
+
+        while (m.find()) {
+            String indent = m.group(1);
+            String returnType = m.group(2);
+            String returnStars = m.group(3);
+            String fnName = m.group(4);
+            String params = m.group(5);
+            String tail = m.group(6);
+
+            // Control-flow keywords read as "Type name(...)" to a pattern this
+            // loose — "if (x)", "while (curr)" — and must never be rewritten.
+            if (isKeyword(returnType) || isKeyword(fnName)) continue;
+
+            boolean changed = false;
+            var rebuiltParams = new StringBuilder();
+            boolean anyParamStarred = false;
+
+            String[] pieces = params.split(",", -1);
+            for (int i = 0; i < pieces.length; i++) {
+                if (i > 0) rebuiltParams.append(", ");
+                java.util.regex.Matcher pm = PARAM.matcher(pieces[i]);
+                if (!pm.matches()) { rebuiltParams.append(pieces[i].trim()); continue; }
+
+                String pType = pm.group(1);
+                String pStars = pm.group(2);
+                String pName = pm.group(3);
+
+                // The rule, and the only one applied here: a parameter the body
+                // dereferences with -> has to be declared a pointer. That is not
+                // style — the code cannot compile otherwise in any language that
+                // uses -> for member access — so there is no version of this
+                // where leaving it alone is right.
+                boolean dereferenced = screenRead.contains(pName + "->");
+                boolean hasStar = pStars.contains("*");
+                if (dereferenced && !hasStar && !isKeyword(pType)) {
+                    rebuiltParams.append(pType).append("* ").append(pName);
+                    changed = true;
+                    anyParamStarred = true;
+                } else {
+                    rebuiltParams.append(pType).append(hasStar ? "* " : " ").append(pName);
+                }
+            }
+
+            // If a parameter became a pointer and the return type is that same
+            // type, the return is the same list/tree and needs the star too —
+            // this is the half that was most often left behind, producing code
+            // that took a pointer and claimed to return a value.
+            String newReturnStars = returnStars;
+            if (anyParamStarred && !returnStars.contains("*")
+                    && params.contains(returnType)) {
+                newReturnStars = "* ";
+                changed = true;
+            } else if (returnStars.contains("*") && !returnStars.endsWith(" ")) {
+                newReturnStars = "* ";
+            }
+
+            if (!changed) continue;
+
+            out.append(screenRead, last, m.start());
+            out.append(indent).append(returnType)
+               .append(newReturnStars.isBlank() ? " " : newReturnStars)
+               .append(fnName).append("(").append(rebuiltParams).append(")").append(tail);
+            last = m.end();
+        }
+
+        out.append(screenRead.substring(last));
+        return out.toString();
+    }
+
+    /** The first line inside a fence that declares a function, for logging. */
+    private static String firstSignatureLine(String text) {
+        if (text == null) return "";
+        java.util.regex.Matcher m = SIGNATURE_LINE.matcher(text);
+        while (m.find()) {
+            if (isKeyword(m.group(2)) || isKeyword(m.group(4))) continue;
+            return m.group().trim();
+        }
+        return "none";
+    }
+
+    /** Words that look like a type to the signature pattern but never are. */
+    private static boolean isKeyword(String word) {
+        switch (word) {
+            case "if": case "while": case "for": case "switch": case "catch":
+            case "return": case "else": case "do": case "sizeof": case "public":
+            case "private": case "protected": case "class": case "struct":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
      * Stage two: the answer, written by a model that is good at code and has
      * never seen the picture.
      */
+    /**
+     * The words actually spoken, pulled out of the client's much larger
+     * prompt-engineering template.
+     *
+     * originalPrompt is not a question, it is the whole instructional prompt
+     * the desktop app builds for the single-stage vision path — hundreds of
+     * lines of formatting rules and worked examples, one of them literally
+     * "the LeetCode Two Sum page" as a sample of naming things specifically.
+     * Forwarding all of that as "what they asked" to a text model that never
+     * sees the image handed it no way to tell an instruction from a fact, and
+     * it answered as though a real screen had shown a LeetCode Two Sum
+     * problem — on a screen that was a pricing dashboard. Confirmed live: a
+     * real request answered "I can see that Chrome is open to the LeetCode
+     * Two Sum problem page" while the actual screen was aihubmix.com.
+     *
+     * The client marks the real question with "THE QUESTION:" before it. That
+     * only exists on the voice-driven path, though — the Analyze hotkey (F8,
+     * no spoken question at all) sends a completely different template, one
+     * with its own CAUSE/FIX/SOLUTION worked examples for the model to
+     * imitate, and no marker to isolate anything. Originally this fell back
+     * to returning that whole template on the reasoning that a client-shaped
+     * miss should degrade to the old behaviour, not fail. That was still the
+     * bug: the F8 path kept forwarding its full instructional prompt to
+     * stage two exactly as before, and stage two answered in CAUSE/FIX
+     * headings copied from the example rather than the SAY THIS/DETAIL shape
+     * its own system prompt defines — confirmed against a real session,
+     * where the same broken function signature was restated as fixed 22
+     * times in a row without the code ever actually changing. A model
+     * spending its attention on someone else's formatting examples has less
+     * of it left for whether the code it just wrote matches the diagnosis it
+     * just wrote above it.
+     *
+     * So the fallback is now a short, generic instruction instead of the raw
+     * prompt — there is no real "question" on this path, only "look at the
+     * screen", and that is exactly what it says now.
+     */
+    private static String actuallyAsked(String originalPrompt) {
+        if (originalPrompt == null) return "Analyze what is on the screen.";
+        int marker = originalPrompt.indexOf("THE QUESTION:");
+        if (marker < 0) return "Analyze what is on the screen.";
+        String tail = originalPrompt.substring(marker + "THE QUESTION:".length());
+        int stop = tail.indexOf("\n\nAnswer in this shape");
+        return (stop > 0 ? tail.substring(0, stop) : tail).trim();
+    }
+
     private List<Map<String, Object>> codingMessages(String screenRead, String originalPrompt) {
         String system = """
             You are the candidate in a live coding interview, answering out loud.
@@ -1279,7 +1740,38 @@ public class InterviewController {
             declared Node* is used with ->, one declared Node is used with a dot,
             and mixing them is the most common way this goes wrong. Do not use a
             variable after deleting or erasing it. Keep the exact class and method
-            names the problem gives.
+            names the problem gives — the identifiers, the same words, never the
+            types on them.
+
+            THE SIGNATURE IS PART OF THE CODE. Worked example, because this exact
+            case keeps being explained correctly and then not actually fixed:
+
+            EXISTING CODE said: ListNode insertionSortList(ListNode head) {
+            if (!head || !head->next) return head; ...
+            WRONG — do not do this: write "I'll change the signature to take
+            ListNode* head" in SAY THIS, and then DETAIL still opens with
+            ListNode insertionSortList(ListNode head) — the exact same line,
+            untouched. This happened, was sent to a real user, and did not
+            compile, because saying the fix out loud is not the same action as
+            writing it.
+            RIGHT: DETAIL opens with ListNode* insertionSortList(ListNode* head) —
+            both the parameter and the return type carry the asterisk. Every
+            other line may stay exactly as it was; this one line must not.
+
+            The general rule behind that example: a parameter or return type
+            declared without a pointer while the body dereferences it with ->
+            is never really the problem's own starting code, pointer-typed by
+            LeetCode's own templates for every linked-list and tree problem —
+            it is a mistake, possibly your own from an earlier turn, being read
+            back to you as if it were given. When you name that mistake in SAY
+            THIS, DETAIL's first line is where it gets fixed, not restated.
+
+            Before you finish: find the line in DETAIL that declares the method
+            you are solving. Compare it, character by character, to the line
+            you were told is on the screen. If they are identical and you just
+            finished explaining what was wrong with it, you have not fixed
+            anything — go back and change that line now, before sending
+            anything.
 
             Then one line: Time O(...), space O(...).""";
 
@@ -1287,7 +1779,7 @@ public class InterviewController {
                 Map.of("role", "system", "content", system),
                 Map.of("role", "user", "content",
                         "What is on the screen:\n\n" + screenRead
-                        + "\n\nWhat they asked:\n" + originalPrompt));
+                        + "\n\nWhat they asked:\n" + actuallyAsked(originalPrompt)));
     }
 
     /** Carries the provider's own headers, so the wait can be reported honestly. */
