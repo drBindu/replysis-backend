@@ -23,6 +23,14 @@
 
   <dependencies>
     <!-- Web API -->
+    <!-- The speech relay. Carries the Speechmatics websocket on our own
+         domain, because the networks our users are on allow replysis.com and
+         block hosts they have never heard of. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
