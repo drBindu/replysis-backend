@@ -221,7 +221,29 @@ public class InterviewController {
         // the burst of questions that drained Groq is exactly the shape it
         // handles best. Groq stays as the fallback: still free, still fast,
         // and now only reached when Gemini itself is unavailable.
-        final boolean answerOnGemini = geminiApiKey != null && !geminiApiKey.isBlank();
+        // MEASURED, and it contradicts the paragraph above.
+        //
+        // Timed against production on 2026-08-28, same request shape:
+        //
+        //     gemini-3.1-flash-lite    607ms, 623ms, 2811ms
+        //     groq gpt-oss-20b         640ms small prompt, 940ms at 8.7 KB
+        //
+        // Gemini is usually fast and occasionally four times slower, and the
+        // slow case is what a candidate experiences as the app hanging. Groq
+        // was consistent across prompt sizes. The owner's complaint - "it is
+        // thinking so long time, I need instant answers" - is that spike.
+        //
+        // So Groq leads on latency and Gemini becomes the fallback, which is
+        // the right way round for the thing being optimised. Groq meters per
+        // minute and will run out during a burst; that now costs one slower
+        // answer through Gemini rather than an error, because the fallback
+        // below already handles exactly that.
+        //
+        // If a future measurement shows Gemini's spike is gone, swap it back -
+        // but measure first. This paragraph replaced one that asserted Gemini
+        // was faster without a number in it.
+        final boolean answerOnGemini = (groqApiKey == null || groqApiKey.isBlank())
+                                       && geminiApiKey != null && !geminiApiKey.isBlank();
 
         String endpoint = answerOnGemini ? GEMINI_ENDPOINT       : GROQ_ENDPOINT;
         String apiKey   = answerOnGemini ? geminiApiKey          : groqApiKey;
@@ -261,6 +283,14 @@ public class InterviewController {
             fallbackEndpoint = GROQ_ENDPOINT;
             fallbackApiKey   = groqApiKey;
             fallbackModel    = DEFAULT_MODEL;
+        } else if (geminiApiKey != null && !geminiApiKey.isBlank()) {
+            // Groq led, so the fallback is Gemini - a different provider with
+            // different limits, which is what a fallback is for. Falling back
+            // to the other Groq model would share the account that just ran out.
+            fallbackProvider = "gemini";
+            fallbackEndpoint = GEMINI_ENDPOINT;
+            fallbackApiKey   = geminiApiKey;
+            fallbackModel    = ANSWER_MODEL_GEMINI;
         } else {
             fallbackProvider = "groq";
             fallbackEndpoint = GROQ_ENDPOINT;
