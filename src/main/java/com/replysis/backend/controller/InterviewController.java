@@ -277,9 +277,13 @@ public class InterviewController {
         // 6. Charge UP FRONT (atomic). Deducting after the AI answered meant a
         //    failed deduction still served a free answer; charging first closes
         //    that hole. If every provider fails below, the charge is refunded.
+        // Timed because the client counts this as "the AI thinking".
+        long chargeStart = System.currentTimeMillis();
         boolean charged = identity.isGuest()
                 ? creditsService.deductGuestCredits(identity.deviceId())
                 : creditsService.deductCredits(identity.uid());
+        long chargeMs = System.currentTimeMillis() - chargeStart;
+        if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
         if (!charged) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
@@ -291,7 +295,10 @@ public class InterviewController {
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
+                long providerStart = System.currentTimeMillis();
                 HttpResponse<java.io.InputStream> response = callAiProvider(endpoint, apiKey, model, messages);
+                System.out.println("[SLOW] provider " + model + " first byte in "
+                        + (System.currentTimeMillis() - providerStart) + "ms");
 
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
@@ -660,9 +667,13 @@ public class InterviewController {
 
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
         // and a refund below if every vision provider fails.
+        // Timed because the client counts this as "the AI thinking".
+        long chargeStart = System.currentTimeMillis();
         boolean charged = identity.isGuest()
                 ? creditsService.deductGuestCredits(identity.deviceId())
                 : creditsService.deductCredits(identity.uid());
+        long chargeMs = System.currentTimeMillis() - chargeStart;
+        if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
         if (!charged) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
