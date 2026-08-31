@@ -61,11 +61,32 @@ public class InterviewController {
     // Groq shut down llama-3.1-8b-instant on 2026-08-16 and names gpt-oss-20b as
     // its replacement. Keeping the small, fast model here on purpose: answers
     // stream while the candidate is still being asked the question.
-    private static final String DEFAULT_MODEL   = "openai/gpt-oss-20b";
+    // OFF GROQ ENTIRELY, on the owner's instruction, and the reason is
+    // structural rather than a preference: Groq has no paid tier. The free
+    // allowance is 8,000 tokens a minute for the whole account - measured from
+    // the live key's own x-ratelimit headers - and one question costs about
+    // 2,250 of them. That is roughly three and a half questions per minute
+    // across every customer, and no amount of money raises it. A provider you
+    // cannot buy more of is not a provider you can launch on.
+    //
+    // gemini-3.5-flash-lite measured against the alternatives on this key:
+    //
+    //     gemini-3.5-flash-lite   0.89s, 1.12s   1731 chars, fenced code
+    //     gemini-3.1-flash-lite   2.40s, 1.17s   (previous choice, spiky)
+    //     gemini-3.5-flash        4.16s, 4.07s   too slow
+    //     gemini-2.5-flash        0.10s          returns nothing at all
+    //
+    // Faster than what it replaces, steadier, and it emits fenced code, which
+    // the Windows client needs to route an answer into its code panel.
+    private static final String DEFAULT_MODEL   = "gemini-3.5-flash-lite";
 
     // The second Groq budget. Groq's rate limit is per model, so this is a
     // whole separate allowance on the same key, not a share of one.
-    private static final String SECOND_CHOICE_MODEL = "openai/gpt-oss-120b";
+    // The fallback is the previous Gemini model rather than a second Groq
+    // budget. Groq's per-model allowances were a real second budget on one free
+    // key, which is why they were used - but the whole key is now off the
+    // critical path, so the fallback has to be something that can scale.
+    private static final String SECOND_CHOICE_MODEL = "gemini-3.1-flash-lite";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
 
     // Groq has a vision model after all, and it is free on the same key.
@@ -90,12 +111,13 @@ public class InterviewController {
     // from memory instead of reading the red compile error on screen. Also
     // ~37% fewer prompt tokens and no per-minute ceiling, unlike Groq's free
     // tier. See MAC_CATCHUP.md for the full comparison.
-    private static final String VISION_MODEL_GEMINI = "gemini-3.1-flash-lite";
+    // Same move for the screen reader: 3.5 over 3.1 on the measurements above.
+    private static final String VISION_MODEL_GEMINI = "gemini-3.5-flash-lite";
 
     // The spoken-answer model. Same family as the vision one on purpose: it is
     // the fastest tier Google sells, measured under a second to first token,
     // which is the number that matters when somebody is waiting to speak.
-    private static final String ANSWER_MODEL_GEMINI = "gemini-3.1-flash-lite";
+    private static final String ANSWER_MODEL_GEMINI = "gemini-3.5-flash-lite";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -242,8 +264,13 @@ public class InterviewController {
         // If a future measurement shows Gemini's spike is gone, swap it back -
         // but measure first. This paragraph replaced one that asserted Gemini
         // was faster without a number in it.
-        final boolean answerOnGemini = (groqApiKey == null || groqApiKey.isBlank())
-                                       && geminiApiKey != null && !geminiApiKey.isBlank();
+        // Gemini for everything. Groq is no longer in the answer path at all.
+        //
+        // Yesterday this preferred Groq because Groq was faster. It still is,
+        // by about 200ms - and it does not matter, because Groq sells no
+        // capacity above 8,000 tokens a minute. Speed you cannot buy more of is
+        // not speed you can build on.
+        final boolean answerOnGemini = geminiApiKey != null && !geminiApiKey.isBlank();
 
         String endpoint = answerOnGemini ? GEMINI_ENDPOINT       : GROQ_ENDPOINT;
         String apiKey   = answerOnGemini ? geminiApiKey          : groqApiKey;
@@ -278,11 +305,13 @@ public class InterviewController {
         String fallbackModel;
 
         if (answerOnGemini) {
-            // Gemini was primary, so the fallback is the free tier behind it.
-            fallbackProvider = "groq";
-            fallbackEndpoint = GROQ_ENDPOINT;
-            fallbackApiKey   = groqApiKey;
-            fallbackModel    = DEFAULT_MODEL;
+            // Fall back to the older Gemini model rather than to Groq. A
+            // fallback onto a hard-capped free tier is not a fallback: at any
+            // real volume it is already exhausted when it is reached.
+            fallbackProvider = "gemini";
+            fallbackEndpoint = GEMINI_ENDPOINT;
+            fallbackApiKey   = geminiApiKey;
+            fallbackModel    = SECOND_CHOICE_MODEL;
         } else if (geminiApiKey != null && !geminiApiKey.isBlank()) {
             // Groq led, so the fallback is Gemini - a different provider with
             // different limits, which is what a fallback is for. Falling back
@@ -832,8 +861,16 @@ public class InterviewController {
                 }
 
                 if (screenRead != null && !screenRead.isBlank() && !noCodingProblem) {
+                    // Stage two was the last thing on Groq. It wrote the code
+                    // from stage one's description and it wrote it well, but it
+                    // sat on the same 8,000-tokens-a-minute ceiling as
+                    // everything else - and a coding answer is the largest
+                    // request the product makes, so it drained that allowance
+                    // fastest. Measured: gemini-3.5-flash-lite returns 1,731
+                    // characters of fenced Java, which is what the client's code
+                    // panel needs, in about a second.
                     HttpResponse<java.io.InputStream> coded = callAiProvider(
-                            GROQ_ENDPOINT, groqApiKey, SECOND_CHOICE_MODEL,
+                            GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI,
                             codingMessages(screenRead, finalPrompt));
 
                     if (coded.statusCode() == 200) {
