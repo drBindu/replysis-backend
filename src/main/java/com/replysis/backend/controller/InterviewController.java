@@ -304,19 +304,29 @@ public class InterviewController {
         String lastResortApiKey   = openAiApiKey;
         String lastResortModel    = "gpt-4o";
 
-        // 6. Charge UP FRONT (atomic). Deducting after the AI answered meant a
-        //    failed deduction still served a free answer; charging first closes
-        //    that hole. If every provider fails below, the charge is refunded.
-        // Timed because the client counts this as "the AI thinking".
+        // 6. Charge UP FRONT (atomic), but not in front of the model.
+        //
+        //    Charging first closes a real hole: deducting after the AI answered
+        //    meant a failed deduction still served a free answer. That ordering
+        //    stays. What changes is that it no longer BLOCKS the model call.
+        //
+        //    It is a Firestore transaction and it was measured at 254-359ms on
+        //    the live service, sitting in front of a provider that answers in
+        //    about 600ms. Run in sequence that is nearly a second before a word
+        //    appears; run together it is whichever is slower. The candidate is
+        //    stood in silence for the difference.
+        //
+        //    Nothing is served on a failed charge - the result is waited for
+        //    below, before any byte is written - so the guarantee is unchanged.
+        //    The only cost is one provider call whose answer is thrown away
+        //    when someone is genuinely out of credits, which is rare and cheap
+        //    against a second on every question that succeeds.
         long chargeStart = System.currentTimeMillis();
-        boolean charged = identity.isGuest()
-                ? creditsService.deductGuestCredits(identity.deviceId())
-                : creditsService.deductCredits(identity.uid());
-        long chargeMs = System.currentTimeMillis() - chargeStart;
-        if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
-        if (!charged) {
-            return ResponseEntity.status(402).build(); // Payment Required
-        }
+        java.util.concurrent.CompletableFuture<Boolean> chargeTask =
+                java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                        identity.isGuest()
+                                ? creditsService.deductGuestCredits(identity.deviceId())
+                                : creditsService.deductCredits(identity.uid()));
 
         // 7. Stream response
         StreamingResponseBody stream = outputStream -> {
@@ -327,6 +337,25 @@ public class InterviewController {
 
                 long providerStart = System.currentTimeMillis();
                 HttpResponse<java.io.InputStream> response = callAiProvider(endpoint, apiKey, model, messages);
+
+                // The charge ran alongside the call above. Nothing has been
+                // written yet, so refusing here is still a refusal to serve.
+                boolean charged;
+                try {
+                    charged = chargeTask.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (Exception ce) {
+                    System.err.println("[AI] credit charge failed: " + ce);
+                    charged = false;
+                }
+                long chargeMs = System.currentTimeMillis() - chargeStart;
+                if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
+                if (!charged) {
+                    // Same shape as every other failure on this stream, and
+                    // no escaping to get wrong.
+                    outputStream.write(friendlyErrorEvent().getBytes());
+                    outputStream.flush();
+                    return;
+                }
                 System.out.println("[SLOW] provider " + model + " first byte in "
                         + (System.currentTimeMillis() - providerStart) + "ms");
 
