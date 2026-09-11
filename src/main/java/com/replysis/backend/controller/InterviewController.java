@@ -124,6 +124,13 @@ public class InterviewController {
     // interview question measured 847 tokens, so roughly 590 questions a
     // minute. Groq, for comparison, allowed about three and a half.
     private static final String ANSWER_MODEL_CEREBRAS = "gpt-oss-120b";
+
+    // Token cap for the coding stage of a screen answer. gpt-oss bills its
+    // reasoning against max_tokens, and a whole class plus the spoken part can
+    // pass the answer path's 700 on a hard problem. A truncated class does not
+    // compile, which is worse than a slow one. The cap does not change time to
+    // first token.
+    private static final int CODING_STAGE_MAX_TOKENS = 1800;
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -847,32 +854,38 @@ public class InterviewController {
                 }
 
                 if (screenRead != null && !screenRead.isBlank() && !noCodingProblem) {
-                    // Stage two was the last thing on Groq. It wrote the code
-                    // from stage one's description and it wrote it well, but it
-                    // sat on the same 8,000-tokens-a-minute ceiling as
-                    // everything else - and a coding answer is the largest
-                    // request the product makes, so it drained that allowance
-                    // fastest. Measured: gemini-3.5-flash-lite returns 1,731
-                    // characters of fenced Java, which is what the client's code
-                    // panel needs, in about a second.
+                    // Stage two writes the answer from stage one's TEXT description
+                    // and never sees the image, so it needs no vision model - and it
+                    // is the stage the candidate actually waits on. Measured from the
+                    // server on 2026-09-11, same coding prompt, first token / full
+                    // answer in ms, five runs each:
+                    //
+                    //     cerebras gpt-oss-120b   166/246  236/289  335/411  113/166  151/209
+                    //     gemini-3.5-flash-lite   653/1165 698/1052 601/953  604/960  522/928
+                    //
+                    // Cerebras finishes the whole answer before Gemini sends its first
+                    // word. It is also the model family that wrote this stage when it
+                    // ran on Groq, so the SAY THIS / fenced DETAIL shape is known to
+                    // hold on it. Gemini is used when there is no Cerebras key, and
+                    // single-stage vision below stays the fallback for a non-200.
+                    final boolean codeOnCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
+                    String codingEndpoint = codeOnCerebras ? CEREBRAS_ENDPOINT     : GEMINI_ENDPOINT;
+                    String codingKey      = codeOnCerebras ? cerebrasApiKey        : geminiApiKey;
+                    String codingModel    = codeOnCerebras ? ANSWER_MODEL_CEREBRAS : VISION_MODEL_GEMINI;
+
                     HttpResponse<java.io.InputStream> coded = callAiProvider(
-                            GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI,
-                            codingMessages(screenRead, finalPrompt));
+                            codingEndpoint, codingKey, codingModel,
+                            codingMessages(screenRead, finalPrompt), CODING_STAGE_MAX_TOKENS);
 
                     if (coded.statusCode() == 200) {
                         providerAccepted = true;
                         answerDelivered = streamCodingAnswerCorrected(coded, outputStream);
                         if (answerDelivered) {
-                            // Names the model that was actually called. This
-                            // printed SECOND_CHOICE_MODEL while the call above
-                            // passed VISION_MODEL_GEMINI, so the log named a
-                            // model that never ran.
-                            System.out.println("[SCREEN_PATH] answered by TWO-STAGE ("
-                                    + VISION_MODEL_GEMINI + ")");
+                            System.out.println("[SCREEN_PATH] answered by TWO-STAGE (" + codingModel + ")");
                             return;
                         }
                     }
-                    System.err.println("Coding stage unusable (HTTP " + coded.statusCode()
+                    System.err.println("Coding stage unusable (" + codingModel + ", HTTP " + coded.statusCode()
                             + "); falling back to the vision model writing it.");
                 }
 
@@ -1138,12 +1151,17 @@ public class InterviewController {
     // ── Helper: call an AI provider's chat-completions endpoint with the given messages ──
     private HttpResponse<java.io.InputStream> callAiProvider(
             String endpoint, String apiKey, String model, List<?> messages) throws Exception {
+        return callAiProvider(endpoint, apiKey, model, messages, 700);
+    }
+
+    private HttpResponse<java.io.InputStream> callAiProvider(
+            String endpoint, String apiKey, String model, List<?> messages, int maxTokens) throws Exception {
 
         var aiPayload = new java.util.HashMap<String, Object>(Map.of(
             "model",             model,
             "messages",          messages,
             "temperature",       0.2,
-            "max_tokens",        700,
+            "max_tokens",        maxTokens,
             "stream",            true,
             "top_p",             0.95
         ));
