@@ -40,16 +40,12 @@ public class InterviewController {
     @Autowired
     private SimpleRateLimiter rateLimiter;
 
-    @Value("${groq.api.key:}")
-    private String groqApiKey;
-
     @Value("${openai.api.key:}")
     private String openAiApiKey;
 
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
-    private static final String GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions";
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
     // Google's OpenAI-compatibility endpoint, not the native generateContent
     // API. It accepts the exact same {model, messages, stream} shape this file
@@ -78,31 +74,12 @@ public class InterviewController {
     //
     // Faster than what it replaces, steadier, and it emits fenced code, which
     // the Windows client needs to route an answer into its code panel.
-    private static final String DEFAULT_MODEL   = "gemini-3.5-flash-lite";
-
-    // The second Groq budget. Groq's rate limit is per model, so this is a
-    // whole separate allowance on the same key, not a share of one.
-    // The fallback is the previous Gemini model rather than a second Groq
-    // budget. Groq's per-model allowances were a real second budget on one free
-    // key, which is why they were used - but the whole key is now off the
-    // critical path, so the fallback has to be something that can scale.
+    // The fallback is the previous Gemini model. Groq's per-model allowances
+    // were a real second budget on one free key, which is why they were used -
+    // but Groq is gone from this file entirely and a fallback has to be
+    // something that can scale.
     private static final String SECOND_CHOICE_MODEL = "gemini-3.1-flash-lite";
     private static final String VISION_MODEL_OPENAI = "gpt-4o";
-
-    // Groq has a vision model after all, and it is free on the same key.
-    //
-    // The comment below used to say no Groq vision model existed, and acted on
-    // it: the whole screen path was hard-wired to OpenAI with OpenAI as its own
-    // fallback. When that account lapsed, screen analysis did not degrade, it
-    // died, and there was nothing behind it.
-    //
-    // The model list is not enough to tell. Asking each model for an image is:
-    // compound, compound-mini and gpt-oss all answer "content must be a
-    // string", and qwen3.6-27b answers "image must have at least 2 pixels in
-    // each dimension" — a complaint about the test pixel, which means it read
-    // the image. Given a real one it returns "blue", streams, and accepts
-    // detail:high exactly as the app already sends it.
-    private static final String VISION_MODEL_GROQ = "qwen/qwen3.6-27b";
 
     // Primary screen reader as of 2026-08-22. Measured head-to-head against
     // qwen3.6-27b on a hard synthetic screen (file tree, two compiler errors,
@@ -193,13 +170,16 @@ public class InterviewController {
         String resume = textOrEmpty(payload.get("resume"), MAX_RESUME_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
         if (providerInput == null) return rejectAsk("provider field was not usable text");
-        final String provider = providerInput.isBlank() ? "groq" : providerInput.toLowerCase();
+        // Shipped desktop clients send "groq" in this field and cannot be
+        // updated retroactively, so the string is still accepted. It is a label
+        // now and selects nothing: every route in this file is Gemini.
+        final String provider = providerInput.isBlank() ? "gemini" : providerInput.toLowerCase();
 
         if (question == null || question.isBlank())
             return rejectAsk("question missing, blank, or longer than " + MAX_QUESTION_CHARS + " chars");
         if (resume == null)
             return rejectAsk("resume longer than " + MAX_RESUME_CHARS + " chars");
-        if (!provider.equals("groq") && !provider.equals("openai"))
+        if (!provider.equals("groq") && !provider.equals("openai") && !provider.equals("gemini"))
             return rejectAsk("provider not on the allow-list");
 
         // 4. Build AI messages.
@@ -227,57 +207,46 @@ public class InterviewController {
 
         // 5. Build AI request
         //
-        // Gemini answers first when its key is present, and Groq behind it.
+        // Gemini, for everything. There is no second provider in this path.
         //
-        // This used to lead with Groq's free tier and it was failing users
-        // outright, not slowly: measured on one real session, ten requests in
-        // twenty-five minutes produced six rate limits, and once both Groq
-        // models were drained the chain ended at an OpenAI account that has
-        // been inactive since 2026-08-22 — credits deducted, every provider
-        // refused, credits refunded, and the candidate given nothing at all
-        // while an interviewer waited. A free tier metered per minute cannot
-        // carry a paid product's answer path; it can only stand behind one.
+        // Three decisions were stacked in this comment, each contradicting the
+        // one above it and none of them deleted. What follows is the history
+        // compressed, because the measurements are worth keeping and the
+        // reversals are what stop somebody swapping it back.
         //
-        // Gemini's limits are per-day rather than per-minute and its flash-lite
-        // tier is both cheaper per token and faster than what it replaces, so
-        // the burst of questions that drained Groq is exactly the shape it
-        // handles best. Groq stays as the fallback: still free, still fast,
-        // and now only reached when Gemini itself is unavailable.
-        // MEASURED, and it contradicts the paragraph above.
+        // 1. It led with Groq's free tier, and that failed users outright
+        //    rather than slowly: ten requests in twenty-five minutes on one
+        //    real session produced six rate limits, and once both Groq models
+        //    were drained the chain ended at an OpenAI account inactive since
+        //    2026-08-22 - credits deducted, every provider refused, credits
+        //    refunded, and the candidate given nothing while an interviewer
+        //    waited.
         //
-        // Timed against production on 2026-08-28, same request shape:
+        // 2. It swapped back to Groq on latency, measured 2026-08-28:
         //
-        //     gemini-3.1-flash-lite    607ms, 623ms, 2811ms
-        //     groq gpt-oss-20b         640ms small prompt, 940ms at 8.7 KB
+        //        gemini-3.1-flash-lite    607ms, 623ms, 2811ms
+        //        groq gpt-oss-20b         640ms small prompt, 940ms at 8.7 KB
         //
-        // Gemini is usually fast and occasionally four times slower, and the
-        // slow case is what a candidate experiences as the app hanging. Groq
-        // was consistent across prompt sizes. The owner's complaint - "it is
-        // thinking so long time, I need instant answers" - is that spike.
+        //    Gemini was usually fast and occasionally four times slower, and
+        //    the spike is what a candidate experiences as the app hanging.
         //
-        // So Groq leads on latency and Gemini becomes the fallback, which is
-        // the right way round for the thing being optimised. Groq meters per
-        // minute and will run out during a burst; that now costs one slower
-        // answer through Gemini rather than an error, because the fallback
-        // below already handles exactly that.
+        // 3. Groq was removed entirely, and that is where it stands. Groq is
+        //    still about 200ms faster and it does not matter: Groq sells no
+        //    capacity above 8,000 tokens a minute - roughly three and a half
+        //    questions a minute for the whole product, across every user - and
+        //    has no paid tier to buy more of. Speed you cannot buy more of is
+        //    not speed you can build on.
         //
-        // If a future measurement shows Gemini's spike is gone, swap it back -
-        // but measure first. This paragraph replaced one that asserted Gemini
-        // was faster without a number in it.
-        // Gemini for everything. Groq is no longer in the answer path at all.
-        //
-        // Yesterday this preferred Groq because Groq was faster. It still is,
-        // by about 200ms - and it does not matter, because Groq sells no
-        // capacity above 8,000 tokens a minute. Speed you cannot buy more of is
-        // not speed you can build on.
-        final boolean answerOnGemini = geminiApiKey != null && !geminiApiKey.isBlank();
-
-        String endpoint = answerOnGemini ? GEMINI_ENDPOINT       : GROQ_ENDPOINT;
-        String apiKey   = answerOnGemini ? geminiApiKey          : groqApiKey;
-        String model    = answerOnGemini ? ANSWER_MODEL_GEMINI   : DEFAULT_MODEL;
+        // The 2811ms spike from (2) is real and unsolved. It is a reason to
+        // find a faster provider that sells capacity, not a reason to go back:
+        // re-measured 2026-09-11 at 624/621/666ms on gemini-3.5-flash-lite,
+        // with no spike in three runs.
+        String endpoint = GEMINI_ENDPOINT;
+        String apiKey   = geminiApiKey;
+        String model    = ANSWER_MODEL_GEMINI;
 
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("No API key for provider: " + provider);
+            System.err.println("No Gemini key configured; the answer path has no provider");
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
@@ -299,33 +268,13 @@ public class InterviewController {
         // billing, and turns most rate limits into a slightly slower answer
         // rather than none. OpenAI stays as the third try for whoever has it,
         // and is skipped without a word when the key is missing or inactive.
-        String fallbackProvider;
-        String fallbackEndpoint;
-        String fallbackApiKey;
-        String fallbackModel;
-
-        if (answerOnGemini) {
-            // Fall back to the older Gemini model rather than to Groq. A
-            // fallback onto a hard-capped free tier is not a fallback: at any
-            // real volume it is already exhausted when it is reached.
-            fallbackProvider = "gemini";
-            fallbackEndpoint = GEMINI_ENDPOINT;
-            fallbackApiKey   = geminiApiKey;
-            fallbackModel    = SECOND_CHOICE_MODEL;
-        } else if (geminiApiKey != null && !geminiApiKey.isBlank()) {
-            // Groq led, so the fallback is Gemini - a different provider with
-            // different limits, which is what a fallback is for. Falling back
-            // to the other Groq model would share the account that just ran out.
-            fallbackProvider = "gemini";
-            fallbackEndpoint = GEMINI_ENDPOINT;
-            fallbackApiKey   = geminiApiKey;
-            fallbackModel    = ANSWER_MODEL_GEMINI;
-        } else {
-            fallbackProvider = "groq";
-            fallbackEndpoint = GROQ_ENDPOINT;
-            fallbackApiKey   = groqApiKey;
-            fallbackModel    = SECOND_CHOICE_MODEL;
-        }
+        // A fallback onto a hard-capped free tier is not a fallback: at any real
+        // volume it is already exhausted by the time it is reached. So the
+        // fallback is the previous Gemini model, on the same key that scales.
+        String fallbackProvider = "gemini";
+        String fallbackEndpoint = GEMINI_ENDPOINT;
+        String fallbackApiKey   = geminiApiKey;
+        String fallbackModel    = SECOND_CHOICE_MODEL;
 
         // Third try, only for a key that actually works. Reached when both Groq
         // models are limited, which needs 16,000 tokens inside one minute.
@@ -436,7 +385,7 @@ public class InterviewController {
                 if (response.statusCode() != 200
                         && lastResortApiKey != null && !lastResortApiKey.isBlank()
                         && !lastResortEndpoint.equals(fallbackEndpoint)) {
-                    System.err.println("Both Groq models returned HTTP " + response.statusCode()
+                    System.err.println("Both Gemini models returned HTTP " + response.statusCode()
                             + ", trying openai/" + lastResortModel);
                     response = callAiProvider(lastResortEndpoint, lastResortApiKey, lastResortModel, messages);
                 }
@@ -692,7 +641,10 @@ public class InterviewController {
         String prompt = text(payload.get("prompt"), MAX_SCREEN_PROMPT_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
         if (providerInput == null) return rejectScreen("provider field was not usable text");
-        final String provider = providerInput.isBlank() ? "groq" : providerInput.toLowerCase();
+        // Shipped desktop clients send "groq" in this field and cannot be
+        // updated retroactively, so the string is still accepted. It is a label
+        // now and selects nothing: every route in this file is Gemini.
+        final String provider = providerInput.isBlank() ? "gemini" : providerInput.toLowerCase();
 
         if (image == null || image.isBlank()) {
             // An id that resolved to nothing is worth naming: it means the
@@ -706,7 +658,7 @@ public class InterviewController {
             return rejectScreen("prompt missing, blank, or longer than " + MAX_SCREEN_PROMPT_CHARS + " chars");
         if (!isBase64(image))
             return rejectScreen("image was not valid base64");
-        if (!provider.equals("groq") && !provider.equals("openai"))
+        if (!provider.equals("groq") && !provider.equals("openai") && !provider.equals("gemini"))
             return rejectScreen("provider not on the allow-list");
 
         // Vision runs on Gemini whatever the caller asks for, same as it ran on
@@ -723,29 +675,27 @@ public class InterviewController {
         // image_url — Gemini's OpenAI-compat endpoint ignores it rather than
         // rejecting it, same as Groq does.
         //
-        // Groq behind it as the free fallback. OpenAI dropped from the
-        // automatic chain on 2026-08-22: the account came back "account is not
-        // active, please check your billing" on every model tested, confirmed
-        // by calling it directly, not inferred. Re-add a third tier here if
-        // that account is ever reactivated — see MAC_CATCHUP.md.
+        // The fallback is the previous Gemini model, not another provider.
+        // Groq was removed from this file entirely; OpenAI dropped out of the
+        // automatic chain on 2026-08-22, when the account came back "account is
+        // not active, please check your billing" on every model tested,
+        // confirmed by calling it directly rather than inferred.
         //
         // Assigned once. The streaming lambda below captures these, so they
         // have to stay effectively final.
-        final boolean primaryIsGemini = geminiApiKey != null && !geminiApiKey.isBlank();
-
-        String endpoint = primaryIsGemini ? GEMINI_ENDPOINT     : GROQ_ENDPOINT;
-        String apiKey   = primaryIsGemini ? geminiApiKey        : groqApiKey;
-        String model    = primaryIsGemini ? VISION_MODEL_GEMINI : VISION_MODEL_GROQ;
+        String endpoint = GEMINI_ENDPOINT;
+        String apiKey   = geminiApiKey;
+        String model    = VISION_MODEL_GEMINI;
 
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("No vision API key configured for either provider");
+            System.err.println("No Gemini key configured; the screen path has no provider");
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
-        String fallbackProvider = primaryIsGemini ? "groq" : "gemini";
-        String fallbackEndpoint = primaryIsGemini ? GROQ_ENDPOINT      : GEMINI_ENDPOINT;
-        String fallbackApiKey   = primaryIsGemini ? groqApiKey         : geminiApiKey;
-        String fallbackModel    = primaryIsGemini ? VISION_MODEL_GROQ  : VISION_MODEL_GEMINI;
+        String fallbackProvider = "gemini";
+        String fallbackEndpoint = GEMINI_ENDPOINT;
+        String fallbackApiKey   = geminiApiKey;
+        String fallbackModel    = SECOND_CHOICE_MODEL;
 
         final String finalImage  = image;
         final List<String> finalImages = stashedImages.isEmpty()
@@ -1123,16 +1073,14 @@ public class InterviewController {
         // returns the answer alone — "blue" rather than a paragraph about how
         // it decided.
         //
-        // Only sent to Groq. OpenAI rejects the field, and a rejected request
-        // here means a blank screen answer.
+        // This was only ever sent to Groq, which is gone. OpenAI rejects the
+        // field and a rejected request here means a blank screen answer, so it
+        // is not sent at all rather than sent conditionally to nothing.
         var aiPayload = new java.util.LinkedHashMap<String, Object>();
         aiPayload.put("model",      model);
         aiPayload.put("messages",   messages);
         aiPayload.put("max_tokens", 4096);
         aiPayload.put("stream",     true);
-        if (endpoint.equals(GROQ_ENDPOINT)) {
-            aiPayload.put("reasoning_effort", "none");
-        }
 
         String body = mapper.writeValueAsString(aiPayload);
 

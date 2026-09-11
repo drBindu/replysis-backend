@@ -11,33 +11,32 @@ import java.util.*;
 @Service
 public class ResumeTailorService {
 
-    @Value("${groq.api.key:}")
-    private String groqApiKey;
-
     @Value("${openai.api.key:}")
     private String openAiApiKey;
 
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
-    private final String GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions";
-    // llama-3.3-70b-versatile was shut down by Groq on 2026-08-16; gpt-oss-120b
-    // is the replacement they name for it.
-    private final String GROQ_MODEL   = "openai/gpt-oss-120b";
     private final String OPENAI_URL   = "https://api.openai.com/v1/chat/completions";
     private final String OPENAI_MODEL = "gpt-4o";
-    private final String GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+    // gemini-2.0-flash was RETIRED and answered 404 on every call - "This model
+    // models/gemini-2.0-flash is no longer available". It was the fallback
+    // behind Groq, so it had almost certainly never run: pulling the Groq key
+    // would have failed every tailor request rather than degrading. Verified
+    // against the live endpoint on 2026-09-11, both the old name failing and
+    // this one answering.
+    private final String GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
 
     // ── Public entry points ──
 
     public String generateTailoredMatter(Map<String, Object> resume, String jd) {
         return generateTailoredMatter(resume, jd, List.of(),
-                List.of("summary", "skills", "experience", "projects"), "groq");
+                List.of("summary", "skills", "experience", "projects"), "gemini");
     }
 
     public String generateTailoredMatter(Map<String, Object> resume, String jd,
                                           List<String> selectedSkills, List<String> sections) {
-        return generateTailoredMatter(resume, jd, selectedSkills, sections, "groq");
+        return generateTailoredMatter(resume, jd, selectedSkills, sections, "gemini");
     }
 
     public String generateTailoredMatter(Map<String, Object> resume, String jd,
@@ -48,7 +47,7 @@ public class ResumeTailorService {
             String resolvedProvider = resolveProvider(provider);
             System.out.println("=== AI TAILORING REQUEST ===");
             System.out.println("Provider selected: " + resolvedProvider);
-            System.out.println("Keys: Groq=" + hasKey(groqApiKey) + " OpenAI=" + hasKey(openAiApiKey) + " Gemini=" + hasKey(geminiApiKey));
+            System.out.println("Keys: OpenAI=" + hasKey(openAiApiKey) + " Gemini=" + hasKey(geminiApiKey));
 
             // Keep up to 4 bullets per item so AI has context but doesn't just copy 2
             Map<String, Object> slimResume = buildSlimResume(resume);
@@ -123,12 +122,8 @@ public class ResumeTailorService {
                 System.out.println("Calling Gemini...");
                 content = callGemini(sys, user);
             } else {
-                System.out.println("Attempt 1: Groq JSON mode...");
-                content = callGroq(sys, user, true);
-                if (content == null || content.isBlank()) {
-                    System.out.println("Attempt 2: Groq plain mode...");
-                    content = callGroq(sys, user, false);
-                }
+                System.out.println("Calling Gemini...");
+                content = callGemini(sys, user);
             }
 
             if (content == null || content.isBlank()) {
@@ -179,72 +174,27 @@ public class ResumeTailorService {
     private boolean hasKey(String k) { return k != null && !k.isBlank(); }
 
     private String resolveProvider(String requested) {
-        if (requested == null || requested.isBlank()) requested = "groq";
+        if (requested == null || requested.isBlank()) requested = "gemini";
         String p = requested.toLowerCase().trim();
 
         switch (p) {
             case "openai":
                 if (hasKey(openAiApiKey)) return "openai";
                 System.out.println("'openai' key not configured, falling back silently...");
-                if (hasKey(groqApiKey))   return "groq";
                 if (hasKey(geminiApiKey)) return "gemini";
                 break;
+            // "groq" is still accepted as an input string because callers pass
+            // it and cannot all be updated at once. It is a label now and
+            // resolves to Gemini, same as the default.
             case "gemini":
-                if (hasKey(geminiApiKey)) return "gemini";
-                System.out.println("'gemini' key not configured, falling back silently...");
-                if (hasKey(groqApiKey))   return "groq";
-                if (hasKey(openAiApiKey)) return "openai";
-                break;
             case "groq":
             default:
-                if (hasKey(groqApiKey))   return "groq";
-                System.out.println("'groq' key not configured, falling back silently...");
-                if (hasKey(openAiApiKey)) return "openai";
                 if (hasKey(geminiApiKey)) return "gemini";
+                System.out.println("'gemini' key not configured, falling back silently...");
+                if (hasKey(openAiApiKey)) return "openai";
                 break;
         }
-        throw new RuntimeException("No AI API key configured. Add GROQ_API_KEY to your .env file and restart the backend.");
-    }
-
-    // ── Groq call ──
-
-    private String callGroq(String sys, String user, boolean jsonMode) {
-        try {
-            Map<String, Object> body = new HashMap<>();
-            body.put("model", GROQ_MODEL);
-            body.put("temperature", 0.3);
-            body.put("max_tokens", 3000);
-            // Reasoning is billed against max_tokens here too, and a tailored
-            // resume truncated halfway is worse than a slow one: it parses as a
-            // failure and the user is charged for it.
-            body.put("reasoning_effort", "low");
-            body.put("include_reasoning", false);
-            body.put("messages", List.of(
-                Map.of("role", "system", "content", sys),
-                Map.of("role", "user",   "content", user)
-            ));
-            if (jsonMode) body.put("response_format", Map.of("type", "json_object"));
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("Authorization", "Bearer " + groqApiKey);
-
-            RestTemplate rt = restTemplate();
-            ResponseEntity<Map> res = rt.postForEntity(GROQ_URL, new HttpEntity<>(body, headers), Map.class);
-            if (res.getBody() == null) return null;
-
-            List<Map<String, Object>> choices = (List<Map<String, Object>>) res.getBody().get("choices");
-            if (choices == null || choices.isEmpty()) return null;
-
-            System.out.println("GROQ finish_reason: " + choices.get(0).get("finish_reason"));
-            String content = (String) ((Map<String, Object>) choices.get(0).get("message")).get("content");
-            System.out.println("GROQ content length: " + (content != null ? content.length() : 0));
-            return content;
-        } catch (org.springframework.web.client.HttpClientErrorException e) {
-            System.err.println("GROQ HTTP ERROR: " + e.getStatusCode());
-            if (jsonMode && e.getResponseBodyAsString().contains("response_format")) return null;
-            throw e;
-        }
+        throw new RuntimeException("No AI API key configured. Add GEMINI_API_KEY to your .env file and restart the backend.");
     }
 
     // ── OpenAI call ──

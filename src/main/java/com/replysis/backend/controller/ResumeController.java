@@ -147,9 +147,11 @@ public class ResumeController {
             if (sectionsToEnhance.isEmpty())
                 sectionsToEnhance = List.of("summary", "skills", "experience", "projects");
 
-            String provider = boundedText(payload.getOrDefault("provider", "groq"), 20);
+            String provider = boundedText(payload.getOrDefault("provider", "gemini"), 20);
             if (provider == null) return ResponseEntity.badRequest().body(Map.of("error", "Invalid provider."));
             provider = provider.toLowerCase();
+            // "groq" stays on the allow-list as an accepted input string only:
+            // callers still send it and it resolves to Gemini like everything else.
             if (!List.of("groq", "openai", "gemini").contains(provider))
                 return ResponseEntity.badRequest().body(Map.of("error", "Unsupported provider."));
 
