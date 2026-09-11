@@ -46,7 +46,17 @@ public class InterviewController {
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
+    @Value("${cerebras.api.key:}")
+    private String cerebrasApiKey;
+
     private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+
+    // Cerebras speaks the same OpenAI chat-completions shape. Verified against
+    // the live endpoint that it accepts this file's exact payload - temperature,
+    // top_p, frequency_penalty, presence_penalty and reasoning_effort together -
+    // rather than assuming it, because Gemini validates strictly and 400s on
+    // fields it does not know, and that lesson cost a working answer path once.
+    private static final String CEREBRAS_ENDPOINT = "https://api.cerebras.ai/v1/chat/completions";
     // Google's OpenAI-compatibility endpoint, not the native generateContent
     // API. It accepts the exact same {model, messages, stream} shape this file
     // already builds for Groq and OpenAI — including image_url data URIs and
@@ -95,6 +105,25 @@ public class InterviewController {
     // the fastest tier Google sells, measured under a second to first token,
     // which is the number that matters when somebody is waiting to speak.
     private static final String ANSWER_MODEL_GEMINI = "gemini-3.5-flash-lite";
+
+    // The spoken-answer model, measured head-to-head against Gemini on the same
+    // prompt, first token, six runs each on 2026-09-11:
+    //
+    //     cerebras gpt-oss-120b    253 269 295 241 253 264 ms
+    //     gemini-3.5-flash-lite    671 636 569 2330 3085 3109 ms
+    //
+    // Faster on the median, and that is the smaller half of it. Cerebras varies
+    // by 54ms across six runs where Gemini varies by 2,540ms and went over two
+    // seconds on three of six. The spike is what a candidate experiences as the
+    // app hanging in front of an interviewer, and it is the thing the owner has
+    // been reporting for weeks. A model that is steady at 253ms beats one that
+    // is usually 600ms and sometimes three seconds.
+    //
+    // Capacity on the paid tier, read from the response headers rather than a
+    // pricing page: 1,000 requests/min and 500,000 tokens/min. One real
+    // interview question measured 847 tokens, so roughly 590 questions a
+    // minute. Groq, for comparison, allowed about three and a half.
+    private static final String ANSWER_MODEL_CEREBRAS = "gpt-oss-120b";
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -241,12 +270,17 @@ public class InterviewController {
         // find a faster provider that sells capacity, not a reason to go back:
         // re-measured 2026-09-11 at 624/621/666ms on gemini-3.5-flash-lite,
         // with no spike in three runs.
-        String endpoint = GEMINI_ENDPOINT;
-        String apiKey   = geminiApiKey;
-        String model    = ANSWER_MODEL_GEMINI;
+        // Cerebras leads when its key is present, Gemini catches. If the
+        // Cerebras key is absent this is Gemini exactly as before, so the
+        // deployment can carry the key or not and neither state is broken.
+        final boolean answerOnCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
+
+        String endpoint = answerOnCerebras ? CEREBRAS_ENDPOINT     : GEMINI_ENDPOINT;
+        String apiKey   = answerOnCerebras ? cerebrasApiKey        : geminiApiKey;
+        String model    = answerOnCerebras ? ANSWER_MODEL_CEREBRAS : ANSWER_MODEL_GEMINI;
 
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("No Gemini key configured; the answer path has no provider");
+            System.err.println("No answer provider configured: neither Cerebras nor Gemini has a key");
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
 
@@ -268,13 +302,15 @@ public class InterviewController {
         // billing, and turns most rate limits into a slightly slower answer
         // rather than none. OpenAI stays as the third try for whoever has it,
         // and is skipped without a word when the key is missing or inactive.
-        // A fallback onto a hard-capped free tier is not a fallback: at any real
-        // volume it is already exhausted by the time it is reached. So the
-        // fallback is the previous Gemini model, on the same key that scales.
+        // When Cerebras leads, the fallback is a DIFFERENT provider, which is
+        // what a fallback is for - a second Cerebras model would share the
+        // account and the per-minute budget that just ran out. When Gemini
+        // leads (no Cerebras key), it falls back to the older Gemini model,
+        // which is weaker but is all there is.
         String fallbackProvider = "gemini";
         String fallbackEndpoint = GEMINI_ENDPOINT;
         String fallbackApiKey   = geminiApiKey;
-        String fallbackModel    = SECOND_CHOICE_MODEL;
+        String fallbackModel    = answerOnCerebras ? ANSWER_MODEL_GEMINI : SECOND_CHOICE_MODEL;
 
         // Third try, only for a key that actually works. Reached when both Groq
         // models are limited, which needs 16,000 tokens inside one minute.
@@ -1140,9 +1176,20 @@ public class InterviewController {
         // despite being the faster model on paper: 1,000 tokens a second against
         // 560, spent thinking where nobody could see it. Throughput was never the
         // number to optimise for a person waiting to speak.
-        if (model.startsWith("openai/gpt-oss")) {
+        // Cerebras names the model "gpt-oss-120b" with no "openai/" prefix, so
+        // the old startsWith("openai/gpt-oss") test matched nothing on it and
+        // the model would have reasoned at full effort. Measured on Cerebras:
+        // default leaves 391 characters of reasoning against 886 of answer, and
+        // "low" cuts reasoning to 74 while the answer grows to 1,230.
+        //
+        // The two rejected values are recorded because both are the obvious
+        // next thing to try and both fail outright:
+        //     reasoning_effort "none"  -> 400 "Unsupported reasoning effort"
+        //     include_reasoning false  -> 400 "property is unsupported"
+        // include_reasoning was sent to Groq and Groq is gone; sending it to
+        // Cerebras fails the whole request rather than being ignored.
+        if (model.contains("gpt-oss")) {
             aiPayload.put("reasoning_effort", "low");
-            aiPayload.put("include_reasoning", false);
         }
 
         String body = mapper.writeValueAsString(aiPayload);
