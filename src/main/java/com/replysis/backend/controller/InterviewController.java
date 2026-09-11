@@ -827,8 +827,12 @@ public class InterviewController {
                         providerAccepted = true;
                         answerDelivered = streamCodingAnswerCorrected(coded, outputStream);
                         if (answerDelivered) {
+                            // Names the model that was actually called. This
+                            // printed SECOND_CHOICE_MODEL while the call above
+                            // passed VISION_MODEL_GEMINI, so the log named a
+                            // model that never ran.
                             System.out.println("[SCREEN_PATH] answered by TWO-STAGE ("
-                                    + SECOND_CHOICE_MODEL + ")");
+                                    + VISION_MODEL_GEMINI + ")");
                             return;
                         }
                     }
