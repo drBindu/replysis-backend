@@ -15,7 +15,19 @@ import java.util.Map;
 @Service
 public class FirestoreCreditsService {
 
-    private static final int INTERVIEW_QUESTION_COST = 5;
+    // Every charge in the product goes through this class, which makes it the
+    // one place a usage row can be written without a caller being able to
+    // forget. The controllers pass what was bought; the price is already here.
+    private final UsageEventService usageEvents;
+
+    public FirestoreCreditsService(UsageEventService usageEvents) {
+        this.usageEvents = usageEvents;
+    }
+
+    // Public so a caller can name the same price rather than repeating the
+    // literal. The website advertises this as realtime_per_minute in
+    // productFacts.ts and the two must stay equal.
+    public static final int INTERVIEW_QUESTION_COST = 5;
     private static final int GUEST_FREE_CREDITS = 100;
     private static final String ANON_COLLECTION = "anon_devices";
 
@@ -222,14 +234,22 @@ public class FirestoreCreditsService {
     }
 
     public boolean deductCredits(String uid) {
-        return deductCredits(uid, INTERVIEW_QUESTION_COST);
+        return deductCredits(uid, INTERVIEW_QUESTION_COST, null);
     }
 
     public boolean deductCredits(String uid, int cost) {
+        return deductCredits(uid, cost, null);
+    }
+
+    public boolean deductCredits(String uid, int cost, UsageEventService.Context context) {
         // Set inside the transaction, read after it. A transaction body can run
         // more than once on contention, so this records what the last attempt did.
         final java.util.concurrent.atomic.AtomicBoolean charged =
                 new java.util.concurrent.atomic.AtomicBoolean(true);
+        // Read from the same snapshot the charge is decided on, so the usage row
+        // carries an address for the account without a second lookup.
+        final java.util.concurrent.atomic.AtomicReference<String> email =
+                new java.util.concurrent.atomic.AtomicReference<>(null);
         if (cost < 0) return false;
         try {
             Firestore db = FirestoreClient.getFirestore();
@@ -239,6 +259,7 @@ public class FirestoreCreditsService {
                 DocumentSnapshot snap = tx.get(ref).get();
                 if (!snap.exists()) return false;
 
+                email.set(snap.getString("email"));
                 String plan = normalizePlan(snap.getString("plan"));
                 if (isUnlimitedPlan(plan)) { charged.set(false); return true; }
                 long credits = readCredits(snap);
@@ -280,6 +301,11 @@ public class FirestoreCreditsService {
                 System.out.println(charged.get()
                         ? "Credits deducted: uid=" + uid + " cost=" + cost
                         : "Allowed with no charge (unlimited plan): uid=" + uid);
+                // Zero for an unlimited plan, on purpose. The action still
+                // happened and still cost us a provider call, so it belongs in
+                // the portal; it simply was not billed to this account.
+                usageEvents.record(uid, email.get(), false,
+                        charged.get() ? cost : 0, context);
             }
             return deducted;
         } catch (Exception e) {
@@ -312,10 +338,14 @@ public class FirestoreCreditsService {
     }
 
     public void refundCredits(String uid) {
-        refundCredits(uid, INTERVIEW_QUESTION_COST);
+        refundCredits(uid, INTERVIEW_QUESTION_COST, null);
     }
 
     public void refundCredits(String uid, int cost) {
+        refundCredits(uid, cost, null);
+    }
+
+    public void refundCredits(String uid, int cost, UsageEventService.Context context) {
         if (cost <= 0) return;
         try {
             Firestore db = FirestoreClient.getFirestore();
@@ -348,6 +378,10 @@ public class FirestoreCreditsService {
                 return true;
             }).get();
             System.out.println("Credits refunded: uid=" + uid + " amount=" + cost);
+            // Negative, so a sum over the collection is what was actually kept.
+            // A separate row rather than editing the charge: the attempt and the
+            // refund are both facts, and the portal shows the failure rate.
+            usageEvents.record(uid, null, false, -cost, context);
         } catch (Exception e) {
             System.err.println("Firestore refundCredits error: " + describe(e));
         }
@@ -392,10 +426,14 @@ public class FirestoreCreditsService {
     }
 
     public boolean deductGuestCredits(String deviceId) {
-        return deductGuestCredits(deviceId, INTERVIEW_QUESTION_COST);
+        return deductGuestCredits(deviceId, INTERVIEW_QUESTION_COST, null);
     }
 
     public boolean deductGuestCredits(String deviceId, int cost) {
+        return deductGuestCredits(deviceId, cost, null);
+    }
+
+    public boolean deductGuestCredits(String deviceId, int cost, UsageEventService.Context context) {
         if (cost < 0) return false;
         try {
             Firestore db = FirestoreClient.getFirestore();
@@ -449,6 +487,7 @@ public class FirestoreCreditsService {
 
             if (deducted) {
                 System.out.println("Guest credits deducted: device=" + deviceId + " cost=" + cost);
+                usageEvents.record(deviceId, null, true, cost, context);
             }
             return deducted;
         } catch (Exception e) {
@@ -458,10 +497,14 @@ public class FirestoreCreditsService {
     }
 
     public void refundGuestCredits(String deviceId) {
-        refundGuestCredits(deviceId, INTERVIEW_QUESTION_COST);
+        refundGuestCredits(deviceId, INTERVIEW_QUESTION_COST, null);
     }
 
     public void refundGuestCredits(String deviceId, int cost) {
+        refundGuestCredits(deviceId, cost, null);
+    }
+
+    public void refundGuestCredits(String deviceId, int cost, UsageEventService.Context context) {
         if (cost <= 0) return;
         try {
             Firestore db = FirestoreClient.getFirestore();
@@ -492,6 +535,7 @@ public class FirestoreCreditsService {
                 return true;
             }).get();
             System.out.println("Guest credits refunded: device=" + deviceId + " amount=" + cost);
+            usageEvents.record(deviceId, null, true, -cost, context);
         } catch (Exception e) {
             System.err.println("Firestore refundGuestCredits error: " + describe(e));
         }

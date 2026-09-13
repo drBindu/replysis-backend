@@ -37,6 +37,11 @@ public class InterviewController {
     @Autowired
     private FirestoreCreditsService creditsService;
 
+    // Token counts arrive after the charge, so the controller attaches them to
+    // the row the credits service already wrote.
+    @Autowired
+    private com.replysis.backend.service.UsageEventService usageEvents;
+
     @Autowired
     private SimpleRateLimiter rateLimiter;
 
@@ -131,6 +136,11 @@ public class InterviewController {
     // compile, which is worse than a slow one. The cap does not change time to
     // first token.
     private static final int CODING_STAGE_MAX_TOKENS = 1800;
+
+    // What one answer or one screen read costs. Taken from the credits
+    // service so the charge and the recorded usage cannot disagree.
+    private static final int ANSWER_COST =
+            com.replysis.backend.service.FirestoreCreditsService.INTERVIEW_QUESTION_COST;
     private static final int    COST_PER_QUESTION = 5;
     private static final int    MAX_QUESTION_CHARS = 4_000;
     // The screen-analysis prompt is not user-typed text — it is a fixed template
@@ -342,17 +352,39 @@ public class InterviewController {
         //    The only cost is one provider call whose answer is thrown away
         //    when someone is genuinely out of credits, which is rare and cheap
         //    against a second on every question that succeeds.
+        // The provider that is about to be tried. Recorded with the charge so
+        // the portal can show the mix; the fallback is a different row.
+        final com.replysis.backend.service.UsageEventService.Context answerUsage =
+                com.replysis.backend.service.UsageEventService.Context.tracked(
+                        com.replysis.backend.service.UsageEventService.ACTION_ANSWER,
+                        answerOnCerebras ? "cerebras" : "gemini",
+                        answerOnCerebras ? ANSWER_MODEL_CEREBRAS : ANSWER_MODEL_GEMINI);
+        // Prompt and completion tokens, filled in by the stream below.
+        final long[] answerTokens = new long[2];
+
         long chargeStart = System.currentTimeMillis();
         java.util.concurrent.CompletableFuture<Boolean> chargeTask =
                 java.util.concurrent.CompletableFuture.supplyAsync(() ->
                         identity.isGuest()
-                                ? creditsService.deductGuestCredits(identity.deviceId())
-                                : creditsService.deductCredits(identity.uid()));
+                                ? creditsService.deductGuestCredits(identity.deviceId(),
+                                        ANSWER_COST, answerUsage)
+                                : creditsService.deductCredits(identity.uid(),
+                                        ANSWER_COST, answerUsage));
 
         // 7. Stream response
         StreamingResponseBody stream = outputStream -> {
             boolean providerAccepted = false;
             boolean answerDelivered = false;
+            // Whether credits were actually taken.
+            //
+            // The refund below used to fire whenever no answer was delivered,
+            // which includes the case where the charge itself was refused for
+            // want of credits. Nothing had been taken, so the "refund" was a
+            // grant: an account sitting at zero could press space, be told it
+            // had no credits, and be handed five back, capped only by the plan
+            // allowance. Repeat and the meter never runs out. Only a charge
+            // that succeeded can be given back.
+            boolean chargeTaken = false;
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
@@ -377,6 +409,7 @@ public class InterviewController {
                     outputStream.flush();
                     return;
                 }
+                chargeTaken = true;
                 System.out.println("[SLOW] provider " + model + " first byte in "
                         + (System.currentTimeMillis() - providerStart) + "ms");
 
@@ -451,14 +484,14 @@ public class InterviewController {
                 // Doing this here rather than in the app means it costs one
                 // credit instead of two, and it covers the builds already
                 // installed, which cannot retry and were showing the apology.
-                answerDelivered = streamUnlessRefused(response, outputStream);
+                answerDelivered = streamUnlessRefused(response, outputStream, answerTokens);
 
                 if (!answerDelivered) {
                     System.out.println("[AI] Model declined; asking again in plainer words.");
                     HttpResponse<java.io.InputStream> retry =
                             callAiProvider(endpoint, apiKey, model, plainRetryMessages(aiMessages));
                     if (retry.statusCode() == 200)
-                        answerDelivered = streamUnlessRefused(retry, outputStream);
+                        answerDelivered = streamUnlessRefused(retry, outputStream, answerTokens);
                 }
             } catch (Exception e) {
                 System.err.println("Stream error: " + e.getMessage());
@@ -467,10 +500,19 @@ public class InterviewController {
                     outputStream.flush();
                 } catch (Exception ignored) {}
             } finally {
-                // No answer was delivered — return the up-front charge.
-                if (!providerAccepted || !answerDelivered) {
-                    if (identity.isGuest()) creditsService.refundGuestCredits(identity.deviceId());
-                    else                    creditsService.refundCredits(identity.uid());
+                // What this answer actually cost, recorded against the charge.
+                // A retry streams into the same slots, so the figure stored is
+                // the attempt that reached the candidate.
+                usageEvents.attachTokens(answerUsage.eventId(), answerTokens[0], answerTokens[1],
+                        System.currentTimeMillis() - chargeStart);
+
+                // No answer was delivered, return the up-front charge. Only if
+                // there was one: see chargeTaken above.
+                if (chargeTaken && (!providerAccepted || !answerDelivered)) {
+                    if (identity.isGuest()) creditsService.refundGuestCredits(
+                            identity.deviceId(), ANSWER_COST, answerUsage);
+                    else                    creditsService.refundCredits(
+                            identity.uid(), ANSWER_COST, answerUsage);
                 }
             }
         };
@@ -746,13 +788,19 @@ public class InterviewController {
                 : List.copyOf(stashedImages);
         final String finalPrompt = prompt;
 
+        final com.replysis.backend.service.UsageEventService.Context screenUsage =
+                com.replysis.backend.service.UsageEventService.Context.tracked(
+                        com.replysis.backend.service.UsageEventService.ACTION_SCREEN,
+                        "gemini", VISION_MODEL_GEMINI);
+        final long[] screenTokens = new long[2];
+
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
         // and a refund below if every vision provider fails.
         // Timed because the client counts this as "the AI thinking".
         long chargeStart = System.currentTimeMillis();
         boolean charged = identity.isGuest()
-                ? creditsService.deductGuestCredits(identity.deviceId())
-                : creditsService.deductCredits(identity.uid());
+                ? creditsService.deductGuestCredits(identity.deviceId(), ANSWER_COST, screenUsage)
+                : creditsService.deductCredits(identity.uid(), ANSWER_COST, screenUsage);
         long chargeMs = System.currentTimeMillis() - chargeStart;
         if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
         if (!charged) {
@@ -953,7 +1001,7 @@ public class InterviewController {
                 // Doing this here rather than in the app means it costs one
                 // credit instead of two, and it covers the builds already
                 // installed, which cannot retry and were showing the apology.
-                answerDelivered = streamUnlessRefused(response, outputStream);
+                answerDelivered = streamUnlessRefused(response, outputStream, screenTokens);
 
                 if (!answerDelivered) {
                     System.out.println("[VISION] Model declined; asking again in plainer words.");
@@ -961,7 +1009,7 @@ public class InterviewController {
                     HttpResponse<java.io.InputStream> retry =
                             callVisionProvider(endpoint, apiKey, model, plain);
                     if (retry.statusCode() == 200)
-                        answerDelivered = streamUnlessRefused(retry, outputStream);
+                        answerDelivered = streamUnlessRefused(retry, outputStream, screenTokens);
                 }
             } catch (Exception e) {
                 System.err.println("Screen analysis stream error: " + e.getMessage());
@@ -970,10 +1018,18 @@ public class InterviewController {
                     outputStream.flush();
                 } catch (Exception ignored) {}
             } finally {
+                // Vision is billed by token like everything else, so record it
+                // the same way and the portal can compare a screen read with an
+                // answer rather than counting both as one action.
+                usageEvents.attachTokens(screenUsage.eventId(), screenTokens[0], screenTokens[1],
+                        System.currentTimeMillis() - chargeStart);
+
                 // No answer was delivered — return the up-front charge.
                 if (!providerAccepted || !answerDelivered) {
-                    if (identity.isGuest()) creditsService.refundGuestCredits(identity.deviceId());
-                    else                    creditsService.refundCredits(identity.uid());
+                    if (identity.isGuest()) creditsService.refundGuestCredits(
+                            identity.deviceId(), ANSWER_COST, screenUsage);
+                    else                    creditsService.refundCredits(
+                            identity.uid(), ANSWER_COST, screenUsage);
                 }
             }
         };
@@ -1134,6 +1190,14 @@ public class InterviewController {
         aiPayload.put("messages",   messages);
         aiPayload.put("max_tokens", 4096);
         aiPayload.put("stream",     true);
+        // Ask for the token counts. Both providers report them only in the last
+        // chunk of a stream, and only when this is set; without it the product
+        // can bill a customer in credits and never know what the request cost
+        // us in tokens. Verified accepted, HTTP 200 with a usage object, on
+        // both Cerebras and Google's OpenAI-compatibility endpoint before this
+        // was wired up, because this endpoint rejects unknown fields outright
+        // and a rejected request here is a blank answer.
+        aiPayload.put("stream_options", Map.of("include_usage", true));
 
         String body = mapper.writeValueAsString(aiPayload);
 
@@ -1165,6 +1229,15 @@ public class InterviewController {
             "stream",            true,
             "top_p",             0.95
         ));
+
+        // Ask for the token counts. Both providers report them only in the last
+        // chunk of a stream, and only when this is set; without it the product
+        // can bill a customer in credits and never know what the request cost
+        // us in tokens. Verified accepted, HTTP 200 with a usage object, on
+        // both Cerebras and Google's OpenAI-compatibility endpoint before this
+        // was wired up, because this endpoint rejects unknown fields outright
+        // and a rejected request here is a blank answer.
+        aiPayload.put("stream_options", Map.of("include_usage", true));
 
         // Both penalties are OpenAI/Groq-only. Google's OpenAI-compatibility
         // endpoint validates strictly rather than ignoring what it does not
@@ -1243,6 +1316,19 @@ public class InterviewController {
      */
     private boolean streamUnlessRefused(HttpResponse<java.io.InputStream> response,
                                         java.io.OutputStream outputStream) throws Exception {
+        return streamUnlessRefused(response, outputStream, null);
+    }
+
+    /**
+     * @param tokensOut optional two-slot array filled with prompt and completion
+     *                  tokens if the provider reports them. An out-parameter
+     *                  rather than a changed return type, because every caller
+     *                  branches on the boolean and only one of them cares what
+     *                  the request cost.
+     */
+    private boolean streamUnlessRefused(HttpResponse<java.io.InputStream> response,
+                                        java.io.OutputStream outputStream,
+                                        long[] tokensOut) throws Exception {
         StringBuilder opening = new StringBuilder();
         List<String> held = new java.util.ArrayList<>();
         boolean released = false, delivered = false;
@@ -1251,6 +1337,24 @@ public class InterviewController {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (!line.startsWith("data: ")) continue;
+
+                // Read the usage chunk, then swallow it.
+                //
+                // Asking for token counts adds a final chunk whose choices array
+                // is empty. Relaying it would put a new shape in front of every
+                // already-installed desktop client, which cannot be updated
+                // retroactively: the Windows parser was checked and ignores it
+                // safely, the Mac one could not be checked from here, and there
+                // is no reason to find out the hard way. Nothing downstream ever
+                // needed this chunk; it exists so the charge can be priced.
+                long[] usage = usageTokens(line);
+                if (usage != null) {
+                    if (tokensOut != null && tokensOut.length >= 2) {
+                        tokensOut[0] = usage[0];
+                        tokensOut[1] = usage[1];
+                    }
+                    if (isUsageOnlyChunk(line)) continue;
+                }
 
                 if (released) {
                     if (hasContentToken(line)) delivered = true;
@@ -1348,6 +1452,62 @@ public class InterviewController {
             return choices.get(0).path("delta").path("content").asText("");
         } catch (Exception ignored) {
             return "";
+        }
+    }
+
+    /**
+     * Token counts from a stream's final chunk, or null on any other line.
+     *
+     * The usage chunk carries an empty choices array, so the content parsers
+     * above skip it and it would otherwise be thrown away. Returned as a pair
+     * rather than logged, because the point is to store it against the charge.
+     */
+    private long[] usageTokens(String sseLine) {
+        try {
+            if (sseLine == null || !sseLine.startsWith("data: ")) return null;
+            String data = sseLine.substring("data: ".length()).trim();
+            if (data.isEmpty() || "[DONE]".equals(data)) return null;
+
+            JsonNode usage = mapper.readTree(data).path("usage");
+            if (usage.isMissingNode() || usage.isNull()) return null;
+
+            long prompt = usage.path("prompt_tokens").asLong(0);
+            long completion = usage.path("completion_tokens").asLong(0);
+            // Cerebras omits prompt_tokens on some responses and gives only a
+            // total, so derive rather than record a zero that is not true.
+            if (prompt == 0) {
+                long total = usage.path("total_tokens").asLong(0);
+                if (total > completion) prompt = total - completion;
+            }
+            if (prompt <= 0 && completion <= 0) return null;
+            return new long[]{ prompt, completion };
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * True when a chunk carries usage and no content, so dropping it loses
+     * nothing a client would have shown.
+     *
+     * Checked rather than assumed: a provider that ever put usage on a chunk
+     * that also held a token would otherwise have that token silently deleted
+     * from the middle of somebody's answer.
+     */
+    private boolean isUsageOnlyChunk(String sseLine) {
+        try {
+            String data = sseLine.substring("data: ".length()).trim();
+            JsonNode root = mapper.readTree(data);
+            if (root.path("usage").isMissingNode() || root.path("usage").isNull()) return false;
+            JsonNode choices = root.path("choices");
+            if (!choices.isArray() || choices.isEmpty()) return true;
+            // Has choices: only drop it if every one of them is empty of content.
+            for (JsonNode c : choices) {
+                if (!c.path("delta").path("content").asText("").isEmpty()) return false;
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
