@@ -45,8 +45,6 @@ public class InterviewController {
     @Autowired
     private SimpleRateLimiter rateLimiter;
 
-    @Value("${openai.api.key:}")
-    private String openAiApiKey;
 
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
@@ -54,7 +52,6 @@ public class InterviewController {
     @Value("${cerebras.api.key:}")
     private String cerebrasApiKey;
 
-    private static final String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
     // Cerebras speaks the same OpenAI chat-completions shape. Verified against
     // the live endpoint that it accepts this file's exact payload - temperature,
@@ -94,7 +91,6 @@ public class InterviewController {
     // but Groq is gone from this file entirely and a fallback has to be
     // something that can scale.
     private static final String SECOND_CHOICE_MODEL = "gemini-3.1-flash-lite";
-    private static final String VISION_MODEL_OPENAI = "gpt-4o";
 
     // Primary screen reader as of 2026-08-22. Measured head-to-head against
     // qwen3.6-27b on a hard synthetic screen (file tree, two compiler errors,
@@ -225,6 +221,8 @@ public class InterviewController {
             return rejectAsk("question missing, blank, or longer than " + MAX_QUESTION_CHARS + " chars");
         if (resume == null)
             return rejectAsk("resume longer than " + MAX_RESUME_CHARS + " chars");
+        // "openai" stays accepted for the same reason as "groq": installed Windows
+        // builds send it for anyone who once chose GPT-4o. It is only a label now.
         if (!provider.equals("groq") && !provider.equals("openai") && !provider.equals("gemini"))
             return rejectAsk("provider not on the allow-list");
 
@@ -317,8 +315,9 @@ public class InterviewController {
         //
         // Falling back within Groq first therefore costs nothing, needs no
         // billing, and turns most rate limits into a slightly slower answer
-        // rather than none. OpenAI stays as the third try for whoever has it,
-        // and is skipped without a word when the key is missing or inactive.
+        // rather than none. There is no third provider. OpenAI was the third
+        // try, on an account with no billing, so all it ever added was a 429
+        // and a few hundred milliseconds before the same failure. Removed.
         // When Cerebras leads, the fallback is a DIFFERENT provider, which is
         // what a fallback is for - a second Cerebras model would share the
         // account and the per-minute budget that just ran out. When Gemini
@@ -328,12 +327,6 @@ public class InterviewController {
         String fallbackEndpoint = GEMINI_ENDPOINT;
         String fallbackApiKey   = geminiApiKey;
         String fallbackModel    = answerOnCerebras ? ANSWER_MODEL_GEMINI : SECOND_CHOICE_MODEL;
-
-        // Third try, only for a key that actually works. Reached when both Groq
-        // models are limited, which needs 16,000 tokens inside one minute.
-        String lastResortEndpoint = OPENAI_ENDPOINT;
-        String lastResortApiKey   = openAiApiKey;
-        String lastResortModel    = "gpt-4o";
 
         // 6. Charge UP FRONT (atomic), but not in front of the model.
         //
@@ -452,18 +445,6 @@ public class InterviewController {
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", falling back to " + fallbackProvider + "/" + fallbackModel);
                     response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
-                }
-
-                // Third try: OpenAI, for accounts that have it. Skipped in
-                // silence when the key is absent, which is the normal case
-                // before anyone has set up billing, and must not be treated as
-                // an error worth logging on every request.
-                if (response.statusCode() != 200
-                        && lastResortApiKey != null && !lastResortApiKey.isBlank()
-                        && !lastResortEndpoint.equals(fallbackEndpoint)) {
-                    System.err.println("Both Gemini models returned HTTP " + response.statusCode()
-                            + ", trying openai/" + lastResortModel);
-                    response = callAiProvider(lastResortEndpoint, lastResortApiKey, lastResortModel, messages);
                 }
 
                 if (response.statusCode() != 200) {
@@ -743,6 +724,8 @@ public class InterviewController {
             return rejectScreen("prompt missing, blank, or longer than " + MAX_SCREEN_PROMPT_CHARS + " chars");
         if (!isBase64(image))
             return rejectScreen("image was not valid base64");
+        // "openai" stays accepted for the same reason as "groq": installed Windows
+        // builds send it for anyone who once chose GPT-4o. It is only a label now.
         if (!provider.equals("groq") && !provider.equals("openai") && !provider.equals("gemini"))
             return rejectScreen("provider not on the allow-list");
 
@@ -975,7 +958,7 @@ public class InterviewController {
                     messages = justLatest;
                 }
 
-                // Still failing — one last attempt. Both paths are OpenAI now, so
+                // Still failing — one last attempt. The fallback is Gemini, so
                 // the same messages are reused rather than rebuilt.
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode()

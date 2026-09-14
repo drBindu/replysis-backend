@@ -11,14 +11,9 @@ import java.util.*;
 @Service
 public class ResumeTailorService {
 
-    @Value("${openai.api.key:}")
-    private String openAiApiKey;
-
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
-    private final String OPENAI_URL   = "https://api.openai.com/v1/chat/completions";
-    private final String OPENAI_MODEL = "gpt-4o";
     // gemini-2.0-flash was RETIRED and answered 404 on every call - "This model
     // models/gemini-2.0-flash is no longer available". It was the fallback
     // behind Groq, so it had almost certainly never run: pulling the Groq key
@@ -47,7 +42,7 @@ public class ResumeTailorService {
             String resolvedProvider = resolveProvider(provider);
             System.out.println("=== AI TAILORING REQUEST ===");
             System.out.println("Provider selected: " + resolvedProvider);
-            System.out.println("Keys: OpenAI=" + hasKey(openAiApiKey) + " Gemini=" + hasKey(geminiApiKey));
+            System.out.println("Keys: Gemini=" + hasKey(geminiApiKey));
 
             // Keep up to 4 bullets per item so AI has context but doesn't just copy 2
             Map<String, Object> slimResume = buildSlimResume(resume);
@@ -115,16 +110,8 @@ public class ResumeTailorService {
 
             String content = null;
 
-            if ("openai".equals(resolvedProvider)) {
-                System.out.println("Calling OpenAI...");
-                content = callOpenAI(sys, user);
-            } else if ("gemini".equals(resolvedProvider)) {
-                System.out.println("Calling Gemini...");
-                content = callGemini(sys, user);
-            } else {
-                System.out.println("Calling Gemini...");
-                content = callGemini(sys, user);
-            }
+            System.out.println("Calling Gemini...");
+            content = callGemini(sys, user);
 
             if (content == null || content.isBlank()) {
                 throw new RuntimeException("AI provider returned empty response. Try again in 30 seconds.");
@@ -174,57 +161,13 @@ public class ResumeTailorService {
     private boolean hasKey(String k) { return k != null && !k.isBlank(); }
 
     private String resolveProvider(String requested) {
-        if (requested == null || requested.isBlank()) requested = "gemini";
-        String p = requested.toLowerCase().trim();
-
-        switch (p) {
-            case "openai":
-                if (hasKey(openAiApiKey)) return "openai";
-                System.out.println("'openai' key not configured, falling back silently...");
-                if (hasKey(geminiApiKey)) return "gemini";
-                break;
-            // "groq" is still accepted as an input string because callers pass
-            // it and cannot all be updated at once. It is a label now and
-            // resolves to Gemini, same as the default.
-            case "gemini":
-            case "groq":
-            default:
-                if (hasKey(geminiApiKey)) return "gemini";
-                System.out.println("'gemini' key not configured, falling back silently...");
-                if (hasKey(openAiApiKey)) return "openai";
-                break;
-        }
+        // Every label resolves to Gemini. "openai" and "groq" are still accepted,
+        // because callers send them, but neither provider is used. The resume
+        // page defaulted to OpenAI, and this method sent that choice to an
+        // account with no billing whenever a key was merely present, so every
+        // tailor request from the default setting failed with a 429.
+        if (hasKey(geminiApiKey)) return "gemini";
         throw new RuntimeException("No AI API key configured. Add GEMINI_API_KEY to your .env file and restart the backend.");
-    }
-
-    // ── OpenAI call ──
-
-    private String callOpenAI(String sys, String user) {
-        Map<String, Object> body = new HashMap<>();
-        body.put("model", OPENAI_MODEL);
-        body.put("temperature", 0.3);
-        body.put("max_tokens", 3000);
-        body.put("response_format", Map.of("type", "json_object"));
-        body.put("messages", List.of(
-            Map.of("role", "system", "content", sys),
-            Map.of("role", "user",   "content", user)
-        ));
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("Authorization", "Bearer " + openAiApiKey);
-
-        RestTemplate rt = restTemplate();
-        ResponseEntity<Map> res = rt.postForEntity(OPENAI_URL, new HttpEntity<>(body, headers), Map.class);
-        if (res.getBody() == null) return null;
-
-        List<Map<String, Object>> choices = (List<Map<String, Object>>) res.getBody().get("choices");
-        if (choices == null || choices.isEmpty()) return null;
-
-        System.out.println("OPENAI finish_reason: " + choices.get(0).get("finish_reason"));
-        String content = (String) ((Map<String, Object>) choices.get(0).get("message")).get("content");
-        System.out.println("OPENAI content length: " + (content != null ? content.length() : 0));
-        return content;
     }
 
     // ── Gemini call ──
