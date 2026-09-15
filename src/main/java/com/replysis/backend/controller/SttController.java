@@ -195,17 +195,64 @@ public class SttController {
                         .body(Map.of("error", "Speech service temporarily unavailable"));
             }
 
+            Map<String, Object> body = new java.util.HashMap<>();
+            body.put("key", tempKey);
+            body.put("expiresIn", TOKEN_TTL_SECONDS);
+            String deepgramToken = mintDeepgramToken();
+            if (deepgramToken != null) body.put("deepgramToken", deepgramToken);
+
             System.out.println("[STT] Issued temporary SM token (ttl=" + TOKEN_TTL_SECONDS
-                    + "s) to " + identity);
-            return ResponseEntity.ok(Map.of(
-                    "key", tempKey,
-                    "expiresIn", TOKEN_TTL_SECONDS
-            ));
+                    + "s)" + (deepgramToken != null ? " + Deepgram token" : "") + " to " + identity);
+            return ResponseEntity.ok(body);
 
         } catch (Exception e) {
             System.err.println("[STT] Speechmatics mint error: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                     .body(Map.of("error", "Speech service temporarily unavailable"));
+        }
+    }
+
+    @Value("${deepgram.api.key:}")
+    private String deepgramApiKey;
+
+    /**
+     * A short-lived Deepgram token, or null.
+     *
+     * Deepgram is the engine's first choice for English and Speechmatics is its
+     * fallback, so this never fails the request. With no key configured, or
+     * Deepgram refusing, the response carries the Speechmatics token alone and
+     * the app runs exactly as it did before Deepgram was added. Unsetting
+     * DEEPGRAM_API_KEY is therefore the one switch that turns Deepgram off for
+     * every installed app.
+     *
+     * Issued behind the same identity, credit, listening-time and rate checks
+     * as the Speechmatics token, since it spends the same kind of money.
+     *
+     * Same lifetime as the Speechmatics token so the client caches the pair as
+     * one. Deepgram checks a token only when a connection opens, so a session
+     * already running outlives it.
+     */
+    private String mintDeepgramToken() {
+        if (deepgramApiKey == null || deepgramApiKey.isBlank()) return null;
+        try {
+            HttpRequest grant = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.deepgram.com/v1/auth/grant"))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Token " + deepgramApiKey)
+                    .timeout(Duration.ofSeconds(5))
+                    .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"ttl_seconds\": " + TOKEN_TTL_SECONDS + "}"))
+                    .build();
+            HttpResponse<String> res = httpClient.send(grant, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                System.err.println("[STT] Deepgram grant failed: HTTP " + res.statusCode());
+                return null;
+            }
+            String token = mapper.readTree(res.body()).path("access_token").asText("");
+            return token.isEmpty() ? null : token;
+        } catch (Exception e) {
+            System.err.println("[STT] Deepgram grant error: " + e.getClass().getSimpleName());
+            return null;
         }
     }
 
