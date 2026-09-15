@@ -1,5 +1,7 @@
 package com.replysis.backend.service;
 
+import com.google.cloud.firestore.FieldValue;
+
 import com.google.cloud.firestore.DocumentReference;
 import com.google.cloud.firestore.DocumentSnapshot;
 import com.google.cloud.firestore.Firestore;
@@ -112,7 +114,14 @@ public class FirestoreCreditsService {
                 if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
 
                 used += add;
-                tx.update(ref, "audioMinutesUsed", used);
+                // Reports arrive once a minute while a microphone is live, so a recent
+                // lastListeningAt means listening now. The admin portal counts these
+                // against the speech providers' limits on sessions running at once.
+                // Zero-minute reads are balance checks, not listening, and must not
+                // stamp. One write per document: a transaction may not write it twice.
+                if (add > 0) tx.update(ref, Map.of("audioMinutesUsed", used,
+                                                   "lastListeningAt", FieldValue.serverTimestamp()));
+                else tx.update(ref, "audioMinutesUsed", used);
 
                 boolean unlimited = isUnlimitedPlan(plan);
                 return new AudioUsage(safeInt(used), allowance, unlimited, plan);
@@ -146,9 +155,14 @@ public class FirestoreCreditsService {
                 if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
 
                 used += add;
-                if (snap.exists()) tx.update(ref, "audioMinutesUsed", used);
-                else tx.set(ref, Map.of("audioMinutesUsed", used,
-                                        "creditsResetDate", nextResetDate()));
+                Map<String, Object> fields = new java.util.HashMap<>();
+                fields.put("audioMinutesUsed", used);
+                if (add > 0) fields.put("lastListeningAt", FieldValue.serverTimestamp());
+                if (snap.exists()) tx.update(ref, fields);
+                else {
+                    fields.put("creditsResetDate", nextResetDate());
+                    tx.set(ref, fields);
+                }
 
                 return new AudioUsage(safeInt(used), GUEST_FREE_AUDIO_MINUTES, false, "guest");
             }).get();
