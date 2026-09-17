@@ -2188,7 +2188,22 @@ public class InterviewController {
         sb.append("  'That ties into what I described earlier...' / 'Building on that...'\n");
         sb.append("  NEVER say 'As I mentioned in my previous answer' — robotic.\n\n");
 
+        sb.append("RULE 12 — NEVER OPEN WITH A DEFINITION:\n");
+        sb.append("  Opening with 'TERM is a NOUN' is the single clearest sign an answer is\n");
+        sb.append("  being read off a screen. A leading 'A' or 'An' does not excuse it.\n");
+        sb.append("  Open with what it DOES, or what you use it for, so the first verb is an\n");
+        sb.append("  action rather than 'is'.\n");
+        sb.append("  WRONG: 'A hash map is a key-value data structure.'\n");
+        sb.append("  RIGHT: 'A hash map gets you a value back in roughly constant time by\n");
+        sb.append("  hashing the key to a bucket.'\n");
+        sb.append("  WRONG: 'Docker is a containerization platform.'\n");
+        sb.append("  RIGHT: 'Docker packages an app with everything it needs, so it runs the\n");
+        sb.append("  same on my laptop and in prod.'\n");
+        sb.append("  One short clause about how you have used it is good. No textbook theory,\n");
+        sb.append("  no history lesson.\n\n");
+
         sb.append("PERMANENTLY BANNED:\n");
+        sb.append("  - Opening an answer with 'X is a' or 'X is the' (textbook voice)\n");
         sb.append("  - Filler openers\n");
         sb.append("  - Starting intro with education or oldest job\n");
         sb.append("  - Bullets when MICRO mode required\n");
