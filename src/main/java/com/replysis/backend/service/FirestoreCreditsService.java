@@ -65,15 +65,31 @@ public class FirestoreCreditsService {
     // extreme case and not to be felt by anyone real: thirty hours is more
     // interviewing than almost anyone does in a month.
     // ══════════════════════════════════════════════════════════════════════
+    //
+    // The free hour was the one number here that was not generous but expensive.
+    // Listening is the only part of this product that costs real money: an hour
+    // of Deepgram nova-3 with keyterm prompting is about $0.54, and a free user
+    // pays nothing for it. Worked through at the September 2026 rates: ten
+    // thousand free users spending a fifth of their allowance cost about
+    // Rs 110,000 a month, which takes roughly a five percent conversion rate
+    // just to break even before any profit exists.
+    //
+    // Fifteen minutes is still long enough to sit in a real call and watch it
+    // answer, which is the whole job of a free tier, and it costs a quarter as
+    // much. The paid allowances are untouched.
     private static final Map<String, Integer> PLAN_MONTHLY_AUDIO_MINUTES = Map.of(
-            "free",       60,      //  1 hour
+            "free",       15,      //  15 minutes
             "pro",       900,      // 15 hours
             "max",     1_800,      // 30 hours
             "lifetime",1_800,
             "teams",   6_000       // 100 hours, shared across the team
     );
 
-    private static final int GUEST_FREE_AUDIO_MINUTES = 30;
+    // A guest has not signed in, so this is the free tier without an account
+    // behind it, and a new device identifier resets it. It was twice what a
+    // registered free user got, which is backwards: the harder allowance to
+    // police was the larger one. It matches the free tier now.
+    private static final int GUEST_FREE_AUDIO_MINUTES = 15;
 
     public static int monthlyAudioMinutes(String plan) {
         return PLAN_MONTHLY_AUDIO_MINUTES.getOrDefault(normalizePlan(plan),
