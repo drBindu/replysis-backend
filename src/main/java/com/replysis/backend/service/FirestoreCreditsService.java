@@ -97,6 +97,39 @@ public class FirestoreCreditsService {
     }
 
     /**
+     * The allowance for one particular user, which is not always their plan's.
+     *
+     * India buys the same plans at a price set for that market rather than
+     * converted from dollars - Pro is Rs 699 against $29.99 - and a price a
+     * quarter of the other cannot carry the same fifteen hours of speech. At
+     * Rs 699 the full allowance would lose money on every heavy subscriber.
+     *
+     * So the hours are written onto the user when the subscription is created,
+     * from the Stripe price they actually bought, and read back here. Doing it
+     * this way rather than inventing "pro_in" and "max_in" plan names keeps
+     * every feature check in both codebases working unchanged: the plan is
+     * still "pro", only the size of the allowance differs.
+     *
+     * Absent or nonsense values fall back to the plan default, so an older user
+     * document, or one written before this existed, behaves exactly as before.
+     */
+    private static int allowanceFor(DocumentSnapshot snap, String plan) {
+        Long override = readNullableLong(snap, "audioMinutesAllowance");
+        if (override != null && override > 0 && override <= 100_000) return override.intValue();
+        return monthlyAudioMinutes(plan);
+    }
+
+    private static Long readNullableLong(DocumentSnapshot snap, String field) {
+        try {
+            Object value = snap.get(field);
+            if (value instanceof Number number) return number.longValue();
+        } catch (Exception ignored) {
+            // A field of the wrong type is the same as no field at all.
+        }
+        return null;
+    }
+
+    /**
      * Adds listening time to this month's total and says whether the caller is
      * still inside their allowance.
      *
@@ -121,7 +154,7 @@ public class FirestoreCreditsService {
                 if (!snap.exists()) return new AudioUsage(0, monthlyAudioMinutes("free"), false, "free");
 
                 String plan = normalizePlan(snap.getString("plan"));
-                int allowance = monthlyAudioMinutes(plan);
+                int allowance = allowanceFor(snap, plan);
 
                 // Shares the credits reset date, so a user's month is one month
                 // rather than two that drift apart and confuse everybody.
