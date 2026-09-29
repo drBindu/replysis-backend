@@ -75,7 +75,7 @@ public class SttController {
      *
      * The free trial is granted per device, and the device is whatever the
      * caller puts in X-Device-Id - a header the server cannot verify. Rotating
-     * it yields a fresh trial every time: another 100 credits, and another
+     * it yields a fresh trial every time: another 25 credits, and another
      * thirty minutes of transcription, which is the half that costs real money
      * at roughly a pound an hour of audio. Every other limit here is per
      * identity or per minute, so rotating the identity walked around all of

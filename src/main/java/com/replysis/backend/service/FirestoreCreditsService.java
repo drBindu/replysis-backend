@@ -30,21 +30,55 @@ public class FirestoreCreditsService {
     // literal. The website advertises this as realtime_per_minute in
     // productFacts.ts and the two must stay equal.
     public static final int INTERVIEW_QUESTION_COST = 5;
-    private static final int GUEST_FREE_CREDITS = 100;
+
+    // The free trial: five answers, once. It is 25 credits at 5 an answer.
+    //
+    // Decided with the owner on 2026-09-29. It used to be 100 credits a month (twenty
+    // answers, refilled every month), which cost a real amount per free user for as long as
+    // they stayed. It is a taste now, and the taste has to be enough to see it work: three
+    // answers was rejected because one bad first attempt (a setup problem, Auto answering
+    // small talk) would use most of them and the person would leave thinking it does not
+    // work. Five costs about two cents once; a single extra paying customer in a thousand
+    // signups pays for it many times over.
+    //
+    // A guest, who has not signed in, gets the same. Both are ONE TIME: see creditsAfterReset.
+    static final int FREE_TRIAL_CREDITS = 25;
+    private static final int GUEST_FREE_CREDITS = FREE_TRIAL_CREDITS;
     private static final String ANON_COLLECTION = "anon_devices";
 
     // Must match PLAN_MONTHLY_CREDITS in the website's app/api/stt/tokens/route.ts.
     // A plan missing here is normalised to "free", so an unlisted paid tier is
     // silently downgraded to the free allowance. "max" was missing, which meant a
     // Max subscriber was metered as a free user.
+    //
+    // Pro is 500 answers a month and Max 1,500 (2,500 and 7,500 credits at 5 an answer). Free
+    // is the five-answer trial above and is not refilled. Packs are bought separately and are
+    // unchanged (500, 1,500 and 5,000 credits).
     private static final Map<String, Integer> PLAN_MONTHLY_CREDITS = Map.of(
-            "free", 100,
-            "pro", 2_000,
-            "max", 5_000,
+            "free", FREE_TRIAL_CREDITS,
+            "pro", 2_500,
+            "max", 7_500,
             // Retired plans, kept so an existing subscriber keeps their allowance.
-            "lifetime", 5_000,
+            "lifetime", 7_500,
             "teams", 10_000
     );
+
+    /**
+     * What a balance becomes when the month rolls over.
+     *
+     * A paid plan is topped up to its monthly amount, plus any credit packs the customer
+     * bought, which must survive the refill. Free is NOT topped up: it is a one-time trial,
+     * and a person who has not used their five answers by the end of the month must still
+     * have them the next time they open the app, or they never got the trial at all.
+     *
+     * Every place that resets a balance goes through this, because this rule used to be
+     * copied into each of them and the copies drift.
+     */
+    static long creditsAfterReset(String plan, long currentCredits, long purchasedCredits) {
+        String p = normalizePlan(plan);
+        if ("free".equals(p)) return Math.max(0, currentCredits);
+        return monthlyCredits(p) + Math.max(0, purchasedCredits);
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // LISTENING TIME
@@ -271,8 +305,8 @@ public class FirestoreCreditsService {
                 } else if (!Instant.now().isBefore(resetAt)) {
                     // Top-up packs are bought outright and must survive the monthly
                     // refill. Resetting to the plan cap alone silently destroyed
-                    // credits the customer had already paid for.
-                    credits = monthlyCredits(plan) + readLong(snap, "purchasedCredits");
+                    // credits the customer had already paid for. Free is not refilled.
+                    credits = creditsAfterReset(plan, credits, readLong(snap, "purchasedCredits"));
                     tx.update(ref,
                             "credits", credits,
                             "creditsUsed", 0,
@@ -331,8 +365,9 @@ public class FirestoreCreditsService {
                 boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
 
                 if (resetNeeded) {
-                    // Same as getCredits: purchased top-ups survive the refill.
-                    credits = monthlyCredits(plan) + readLong(snap, "purchasedCredits");
+                    // Same as getCredits: purchased top-ups survive the refill, and Free is
+                    // not refilled at all.
+                    credits = creditsAfterReset(plan, credits, readLong(snap, "purchasedCredits"));
                     creditsUsed = 0;
                 }
 
@@ -426,7 +461,12 @@ public class FirestoreCreditsService {
                 boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
 
                 if (resetNeeded) {
-                    credits = cap;
+                    // The month rolled over between the charge and the refund. A paid plan is
+                    // simply refilled; Free is not, so the refund itself is what gives the
+                    // credits back.
+                    credits = "free".equals(normalizePlan(plan))
+                            ? Math.min(cap, credits + cost)
+                            : cap;
                     creditsUsed = 0;
                 } else {
                     credits = Math.min(cap, credits + cost);
@@ -465,7 +505,7 @@ public class FirestoreCreditsService {
                 long credits = readCredits(snap);
                 Instant resetAt = readResetDate(snap);
                 if (resetAt == null || !Instant.now().isBefore(resetAt)) {
-                    credits = GUEST_FREE_CREDITS;
+                    // One-time trial: the month rolling over moves the date and does not refill.
                     tx.update(ref,
                             "credits", credits,
                             "creditsUsed", 0,
@@ -517,7 +557,7 @@ public class FirestoreCreditsService {
                     creditsUsed = readLong(snap, "creditsUsed");
                     resetAt = readResetDate(snap);
                     if (resetAt == null || !Instant.now().isBefore(resetAt)) {
-                        credits = GUEST_FREE_CREDITS;
+                        // One-time trial: not refilled when the month rolls over.
                         creditsUsed = 0;
                     }
                 }
@@ -581,13 +621,10 @@ public class FirestoreCreditsService {
                 Instant resetAt = readResetDate(snap);
                 boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
 
-                if (resetAt == null || resetNeeded) {
-                    credits = GUEST_FREE_CREDITS;
-                    creditsUsed = 0;
-                } else {
-                    credits = Math.min(GUEST_FREE_CREDITS, credits + cost);
-                    creditsUsed = Math.max(0, creditsUsed - cost);
-                }
+                // The trial is never refilled, so a refund is just the credits coming back,
+                // whether or not the month rolled over in between.
+                credits = Math.min(GUEST_FREE_CREDITS, credits + cost);
+                creditsUsed = (resetAt == null || resetNeeded) ? 0 : Math.max(0, creditsUsed - cost);
 
                 tx.update(ref,
                         "credits", credits,
@@ -620,7 +657,7 @@ public class FirestoreCreditsService {
     }
 
     private static int monthlyCredits(String plan) {
-        return PLAN_MONTHLY_CREDITS.getOrDefault(normalizePlan(plan), 100);
+        return PLAN_MONTHLY_CREDITS.getOrDefault(normalizePlan(plan), FREE_TRIAL_CREDITS);
     }
 
     /**
