@@ -54,6 +54,21 @@ public class SttController {
     private static final int PER_IDENTITY_PER_HOUR = 12;
     private static final int PER_IP_PER_MINUTE     = 5;
 
+    // These strict limits are for MINTING, which costs money. They apply only when a token
+    // is about to be issued. A request that is refused with 402 (no credits, no listening
+    // time) costs nothing to answer and must never spend that budget.
+    //
+    // It did (2026-09-29). Every request counted, refused or not, and a client that had
+    // been told "no listening time" retried every 30 seconds. Twelve refusals in six
+    // minutes used the whole hour, and every later reply was 429 "too many requests", which
+    // hid the real reason from the person. Anyone refused a few times was locked out for an
+    // hour behind the wrong message, and the same would have happened to any user, not only
+    // the first who noticed.
+    //
+    // A loose limit still guards the credit lookups behind the 402 checks.
+    private static final int ANY_REQUEST_PER_IDENTITY_PER_HOUR = 240;
+    private static final int ANY_REQUEST_PER_IP_PER_MINUTE     = 60;
+
     /**
      * How many transcription tokens one address may collect for guest trials in
      * a day.
@@ -108,27 +123,14 @@ public class SttController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("error", "Invalid or missing token"));
 
-        // 2. Rate limits — per IP first (cheapest), then per identity
+        // 2. A loose limit on every request, so the lookups below cannot be flooded. The strict
+        //    limits that stop token farming come after the 402 checks (step 3c).
         String ip = rateLimiter.clientIp(request);
-        if (!rateLimiter.tryAcquire("stt-ip:" + ip, PER_IP_PER_MINUTE, 60_000L)
-                || !rateLimiter.tryAcquire("stt-id:" + identityKey(identity), PER_IDENTITY_PER_HOUR, 3_600_000L)) {
+        if (!rateLimiter.tryAcquire("stt-any-ip:" + ip, ANY_REQUEST_PER_IP_PER_MINUTE, 60_000L)
+                || !rateLimiter.tryAcquire("stt-any-id:" + identityKey(identity), ANY_REQUEST_PER_IDENTITY_PER_HOUR, 3_600_000L)) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .header("Retry-After", "60")
-                    .body(Map.of("error", "Too many token requests. Please wait a moment."));
-        }
-
-        // The trial is per device, and the device id is unverifiable, so the
-        // ceiling that actually holds is per address. Counted only for guests:
-        // a signed-in account is verified and limited by the account itself.
-        if (identity.isGuest()
-                && !rateLimiter.tryAcquire("stt-guest-ip:" + ip, GUEST_TOKENS_PER_IP_PER_DAY, 86_400_000L)) {
-            System.out.println("[STT] Guest trial ceiling reached for one address; "
-                    + "further guest tokens refused for the day.");
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .header("Retry-After", "3600")
-                    .body(Map.of("error",
-                            "The free trial limit for this network has been reached. "
-                            + "Sign in to keep using Replysis."));
+                    .body(Map.of("error", "Too many requests. Please wait a moment."));
         }
 
         // 3. Transcription is only issued to callers who can still afford to use it —
@@ -150,8 +152,31 @@ public class SttController {
                 : creditsService.hasAudioTimeLeft(identity.uid());
         if (!hasAudioTime) {
             return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
-                    .body(Map.of("error", "You have used all your listening time this month.",
+                    .body(Map.of("error", "You have reached this month's fair use limit for listening.",
                                  "reason", "audio-limit"));
+        }
+
+        // 3c. A token is about to be minted, which costs money, so the strict limits apply now
+        //     and not earlier: see the note on PER_IDENTITY_PER_HOUR.
+        if (!rateLimiter.tryAcquire("stt-ip:" + ip, PER_IP_PER_MINUTE, 60_000L)
+                || !rateLimiter.tryAcquire("stt-id:" + identityKey(identity), PER_IDENTITY_PER_HOUR, 3_600_000L)) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .header("Retry-After", "60")
+                    .body(Map.of("error", "Too many token requests. Please wait a moment."));
+        }
+
+        // The trial is per device, and the device id is unverifiable, so the
+        // ceiling that actually holds is per address. Counted only for guests:
+        // a signed-in account is verified and limited by the account itself.
+        if (identity.isGuest()
+                && !rateLimiter.tryAcquire("stt-guest-ip:" + ip, GUEST_TOKENS_PER_IP_PER_DAY, 86_400_000L)) {
+            System.out.println("[STT] Guest trial ceiling reached for one address; "
+                    + "further guest tokens refused for the day.");
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .header("Retry-After", "3600")
+                    .body(Map.of("error",
+                            "The free trial limit for this network has been reached. "
+                            + "Sign in to keep using Replysis."));
         }
 
         // 4. Check the master key is configured on the server
