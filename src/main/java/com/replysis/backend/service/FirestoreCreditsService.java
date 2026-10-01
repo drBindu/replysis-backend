@@ -74,6 +74,30 @@ public class FirestoreCreditsService {
      * Every place that resets a balance goes through this, because this rule used to be
      * copied into each of them and the copies drift.
      */
+    /**
+     * Of a charge, how much came out of purchased packs rather than the plan's own monthly allowance.
+     * Packs are spent after the plan: it is the part of this month's use that goes beyond the plan size.
+     * Same arithmetic as the website (app/api/credits/deduct/route.ts), which keeps the two sides agreeing.
+     */
+    static long purchasedPortionOfCharge(long usedBefore, long cost, long planCap) {
+        return Math.min(cost, Math.max(0, usedBefore + cost - planCap));
+    }
+
+    /** Of a refund, how much goes back to the pack balance: the part of this month's use beyond the plan size. */
+    static long purchasedPortionOfRefund(long usedBefore, long cost, long planCap) {
+        return Math.min(cost, Math.max(0, usedBefore - planCap));
+    }
+
+    /**
+     * The balance after a refund. It may never fall below what is held, and the ceiling is the plan PLUS the packs.
+     * It used to be the plan alone, so refunding one answer to someone holding a pack cut their balance back to the
+     * plan size and the pack they paid for disappeared.
+     */
+    static long balanceAfterRefund(long credits, long cost, long planCap, long purchased, long purchasedRefund) {
+        long ceiling = planCap + Math.max(0, purchased) + purchasedRefund;
+        return Math.max(Math.max(0, credits), Math.min(ceiling, Math.max(0, credits) + cost));
+    }
+
     static long creditsAfterReset(String plan, long currentCredits, long purchasedCredits) {
         String p = normalizePlan(plan);
         if ("free".equals(p)) return Math.max(0, currentCredits);
@@ -389,9 +413,17 @@ public class FirestoreCreditsService {
                     return false;
                 }
 
+                // The pack balance goes down when the packs are what is being spent. It was never reduced
+                // here, so the next monthly refill (plan plus purchased) handed back a pack that had already
+                // been used, every month, to anyone who had ever bought one.
+                long purchasedBefore = readLong(snap, "purchasedCredits");
+                long purchasedAfter = Math.max(0,
+                        purchasedBefore - purchasedPortionOfCharge(creditsUsed, cost, monthlyCredits(plan)));
+
                 tx.update(ref,
                         "credits", credits - cost,
                         "creditsUsed", creditsUsed + cost,
+                        "purchasedCredits", purchasedAfter,
                         "creditsResetDate", resetAt == null || resetNeeded
                                 ? nextResetDate() : resetAt.toString());
                 return true;
@@ -468,22 +500,27 @@ public class FirestoreCreditsService {
                 Instant resetAt = readResetDate(snap);
                 boolean resetNeeded = resetAt != null && !Instant.now().isBefore(resetAt);
 
+                long purchased = readLong(snap, "purchasedCredits");
+                long purchasedRefund = 0;
+
                 if (resetNeeded) {
                     // The month rolled over between the charge and the refund. A paid plan is
-                    // simply refilled; Free is not, so the refund itself is what gives the
-                    // credits back.
+                    // simply refilled (plan plus packs); Free is not, so the refund itself is
+                    // what gives the credits back.
                     credits = "free".equals(normalizePlan(plan))
-                            ? Math.min(cap, credits + cost)
-                            : cap;
+                            ? balanceAfterRefund(credits, cost, cap, purchased, 0)
+                            : creditsAfterReset(plan, credits, purchased);
                     creditsUsed = 0;
                 } else {
-                    credits = Math.min(cap, credits + cost);
+                    purchasedRefund = purchasedPortionOfRefund(creditsUsed, cost, cap);
+                    credits = balanceAfterRefund(credits, cost, cap, purchased, purchasedRefund);
                     creditsUsed = Math.max(0, creditsUsed - cost);
                 }
 
                 tx.update(ref,
                         "credits", credits,
                         "creditsUsed", creditsUsed,
+                        "purchasedCredits", purchased + purchasedRefund,
                         "creditsResetDate", resetAt == null || resetNeeded
                                 ? nextResetDate() : resetAt.toString());
                 return true;

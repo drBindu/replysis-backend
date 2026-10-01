@@ -81,4 +81,46 @@ class CreditsPlanTests {
         org.junit.jupiter.api.Assertions.assertTrue(fields.containsKey("stripeCustomerId") && fields.get("stripeCustomerId") == null,
                 "no billing account until someone buys something");
     }
+
+    // ── Packs. The desktop app charges through this class, and the pack balance was never reduced here.
+
+    @Test
+    void spendingWithinThePlanDoesNotTouchAPack() {
+        assertEquals(0, FirestoreCreditsService.purchasedPortionOfCharge(100, 5, 2_500));
+    }
+
+    @Test
+    void spendingPastThePlanComesOutOfThePack() {
+        // 2,498 of 2,500 used, a 5 credit answer: 3 from the plan, 2 from the pack.
+        assertEquals(3, FirestoreCreditsService.purchasedPortionOfCharge(2_498, 5, 2_500));
+        assertEquals(5, FirestoreCreditsService.purchasedPortionOfCharge(2_600, 5, 2_500));
+    }
+
+    @Test
+    void aRefundGoesBackToThePackFirstWhenThePackWasSpent() {
+        assertEquals(5, FirestoreCreditsService.purchasedPortionOfRefund(2_600, 5, 2_500));
+        assertEquals(0, FirestoreCreditsService.purchasedPortionOfRefund(100, 5, 2_500));
+    }
+
+    @Test
+    void aRefundNeverCutsABalanceDownToThePlanSize() {
+        // Pro with a 500 credit pack holds 3,000. Refunding one answer used to leave 2,500: the pack vanished.
+        assertEquals(3_000, FirestoreCreditsService.balanceAfterRefund(3_000, 5, 2_500, 500, 0));
+        assertEquals(3_005, FirestoreCreditsService.balanceAfterRefund(3_000, 5, 2_500, 500, 5));
+    }
+
+    @Test
+    void aRefundStillCannotMintCreditsPastWhatWasPaidFor() {
+        // Nothing spent this month: a refund must not push the balance above plan plus packs.
+        assertEquals(2_500, FirestoreCreditsService.balanceAfterRefund(2_500, 5, 2_500, 0, 0));
+        assertEquals(2_500, FirestoreCreditsService.balanceAfterRefund(2_498, 5, 2_500, 0, 0));
+    }
+
+    @Test
+    void aSpentPackIsNotHandedBackAtTheMonthlyRefill() {
+        // Bought 500, spent all 500 past the plan: purchased is now 0, so the refill is the plan alone.
+        long purchasedAfterSpendingItAll = Math.max(0, 500 - FirestoreCreditsService.purchasedPortionOfCharge(2_500, 500, 2_500));
+        assertEquals(0, purchasedAfterSpendingItAll);
+        assertEquals(2_500, FirestoreCreditsService.creditsAfterReset("pro", 0, purchasedAfterSpendingItAll));
+    }
 }
