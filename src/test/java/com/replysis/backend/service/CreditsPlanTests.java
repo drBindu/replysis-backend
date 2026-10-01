@@ -69,4 +69,16 @@ class CreditsPlanTests {
     void aBalanceIsNeverNegative() {
         assertEquals(0, FirestoreCreditsService.creditsAfterReset("free", -5, 0));
     }
+
+    @Test
+    void aBrandNewAccountStartsWithTheFreeTrialAndNothingPaid() {
+        var fields = FirestoreCreditsService.newAccountFields("abc");
+        assertEquals("free", fields.get("plan"));
+        assertEquals(25, fields.get("credits"), "five answers, so the first speech key request is never refused for credits");
+        assertEquals(0, fields.get("creditsUsed"));
+        assertEquals(0, fields.get("purchasedCredits"));
+        assertEquals("abc", fields.get("uid"));
+        org.junit.jupiter.api.Assertions.assertTrue(fields.containsKey("stripeCustomerId") && fields.get("stripeCustomerId") == null,
+                "no billing account until someone buys something");
+    }
 }

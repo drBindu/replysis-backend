@@ -291,7 +291,15 @@ public class FirestoreCreditsService {
 
             return db.runTransaction(tx -> {
                 DocumentSnapshot snap = tx.get(ref).get();
-                if (!snap.exists()) return new UserCredits(0, "free", false);
+                if (!snap.exists()) {
+                    // A brand-new account asks for its first speech key about a second after it signs in,
+                    // which is before the website has written its record. This used to answer 0, so every
+                    // new person was told "No credits remaining" with their five answers sitting unused
+                    // (2026-10-01). The caller is a verified account, so the record is made here, exactly
+                    // as the website would have made it; the website then only updates it.
+                    tx.create(ref, newAccountFields(uid));
+                    return new UserCredits(FREE_TRIAL_CREDITS, "free", false);
+                }
 
                 String plan = normalizePlan(snap.getString("plan"));
                 long credits = readCredits(snap);
@@ -700,6 +708,30 @@ public class FirestoreCreditsService {
             }
         }
         return null;
+    }
+
+    /**
+     * The record of a brand-new Free account: the same fields the website writes in
+     * app/api/auth/session/route.ts (ensureUserProfile). Whichever of the two runs first creates it, and
+     * the other only updates it, so the email and display name are filled in by the website afterwards.
+     */
+    static Map<String, Object> newAccountFields(String uid) {
+        Map<String, Object> fields = new java.util.HashMap<>();
+        fields.put("uid", uid);
+        fields.put("plan", "free");
+        fields.put("credits", FREE_TRIAL_CREDITS);
+        fields.put("creditsUsed", 0);
+        fields.put("purchasedCredits", 0);
+        fields.put("creditsResetDate", nextResetDate());
+        fields.put("stripeCustomerId", null);
+        fields.put("stripeSubscriptionId", null);
+        fields.put("stripeSubscriptionStatus", null);
+        fields.put("stripeCancelAtPeriodEnd", false);
+        fields.put("stripeCurrentPeriodEnd", null);
+        fields.put("stripeBillingInterval", null);
+        fields.put("createdAt", FieldValue.serverTimestamp());
+        fields.put("lastLogin", FieldValue.serverTimestamp());
+        return fields;
     }
 
     private static String nextResetDate() {
