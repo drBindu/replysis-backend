@@ -378,6 +378,11 @@ public class InterviewController {
             // allowance. Repeat and the meter never runs out. Only a charge
             // that succeeded can be given back.
             boolean chargeTaken = false;
+            // Whether the result of the charge was ever looked at. The charge runs alongside the provider
+            // call, so a provider that fails or times out can end the stream before anyone has asked what
+            // the charge did. It still completes: the person was billed for an answer that never came and
+            // no code refunded it. The finally block settles that case.
+            boolean chargeObserved = false;
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
@@ -389,6 +394,7 @@ public class InterviewController {
                 boolean charged;
                 try {
                     charged = chargeTask.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                    chargeObserved = true;
                 } catch (Exception ce) {
                     System.err.println("[AI] credit charge failed: " + ce);
                     charged = false;
@@ -494,6 +500,18 @@ public class InterviewController {
                             identity.deviceId(), ANSWER_COST, answerUsage);
                     else                    creditsService.refundCredits(
                             identity.uid(), ANSWER_COST, answerUsage);
+                } else if (!chargeObserved) {
+                    // Nothing was served, because the stream ended before the charge result was read. If that
+                    // charge succeeds, whenever it does, give it back. Registered rather than waited for, so the
+                    // request thread is not held, and it fires at once when the charge has already finished.
+                    chargeTask.whenComplete((ok, err) -> {
+                        if (err == null && Boolean.TRUE.equals(ok)) {
+                            if (identity.isGuest()) creditsService.refundGuestCredits(
+                                    identity.deviceId(), ANSWER_COST, answerUsage);
+                            else                    creditsService.refundCredits(
+                                    identity.uid(), ANSWER_COST, answerUsage);
+                        }
+                    });
                 }
             }
         };
