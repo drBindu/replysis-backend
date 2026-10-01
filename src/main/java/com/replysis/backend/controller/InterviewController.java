@@ -1378,6 +1378,16 @@ public class InterviewController {
                 outputStream.flush();
                 held.clear();
             }
+        } catch (java.io.IOException interrupted) {
+            // The connection broke after the answer had started reaching the person: they closed the window,
+            // pressed Space, or their network dropped. They received it, so it is delivered and charged.
+            // This used to rethrow, the stream counted as undelivered, and the whole charge was refunded, so
+            // anyone who cut the connection after the first sentence got every answer free.
+            if (released && delivered) {
+                System.out.println("[AI] Connection ended after the answer had started; counting it as delivered.");
+                return true;
+            }
+            throw interrupted;
         }
 
         // Ended before the probe filled, so nothing has been written yet.

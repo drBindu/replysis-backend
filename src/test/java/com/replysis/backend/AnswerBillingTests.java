@@ -64,4 +64,46 @@ class AnswerBillingTests {
     @Test void deliveredAnswerIsChargedOnceWithoutRefund() throws Exception {
         exercise(true, "data: {\"choices\":[{\"delta\":{\"content\":\"An index speeds up database lookups.\"}}]}\n\ndata: [DONE]\n\n");
     }
+
+    /** An output stream whose reader walks away after the first write. */
+    private static class WalksAway extends OutputStream {
+        int writes = 0;
+        @Override public void write(int b) throws IOException { write(new byte[]{(byte) b}, 0, 1); }
+        @Override public void write(byte[] b, int off, int len) throws IOException {
+            if (++writes > 2) throw new IOException("client closed the connection");
+        }
+    }
+
+    @Test void aClientThatLeavesMidAnswerStillPaysForIt() throws Exception {
+        var controller = new InterviewController();
+        var identity = mock(IdentityResolverService.class);
+        var credits = mock(FirestoreCreditsService.class);
+        var usage = mock(UsageEventService.class);
+        var http = mock(HttpClient.class);
+        when(identity.resolve(null, "test-device")).thenReturn(new RequestIdentity(null, "test-device"));
+        when(credits.deductGuestCredits(eq("test-device"), anyInt(), any())).thenReturn(true);
+        StringBuilder sse = new StringBuilder();
+        for (int i = 0; i < 60; i++)
+            sse.append("data: {\"choices\":[{\"delta\":{\"content\":\"An index speeds up lookups by keeping keys sorted. \"}}]}\n\n");
+        sse.append("data: [DONE]\n\n");
+        when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenAnswer(call -> {
+            HttpResponse<InputStream> response = mock(HttpResponse.class);
+            when(response.statusCode()).thenReturn(200);
+            when(response.body()).thenReturn(new ByteArrayInputStream(sse.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            return response;
+        });
+        ReflectionTestUtils.setField(controller, "identityResolver", identity);
+        ReflectionTestUtils.setField(controller, "creditsService", credits);
+        ReflectionTestUtils.setField(controller, "usageEvents", usage);
+        ReflectionTestUtils.setField(controller, "rateLimiter", new SimpleRateLimiter());
+        ReflectionTestUtils.setField(controller, "geminiApiKey", "synthetic-test-key");
+        ReflectionTestUtils.setField(controller, "httpClient", http);
+        var request = new MockHttpServletRequest();
+        request.setRemoteAddr("127.0.0.1");
+        var result = controller.askQuestion(null, "test-device", request, Map.of("question", "Explain database indexes"));
+        result.getBody().writeTo(new WalksAway());
+        verify(credits, timeout(1000)).deductGuestCredits(eq("test-device"), anyInt(), any());
+        Thread.sleep(200);
+        verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any());
+    }
 }
