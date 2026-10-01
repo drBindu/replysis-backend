@@ -67,14 +67,20 @@ class AnswerBillingTests {
 
     /** An output stream whose reader walks away after the first write. */
     private static class WalksAway extends OutputStream {
+        final int maxWrites;
         int writes = 0;
+        WalksAway(int maxWrites) { this.maxWrites = maxWrites; }
         @Override public void write(int b) throws IOException { write(new byte[]{(byte) b}, 0, 1); }
         @Override public void write(byte[] b, int off, int len) throws IOException {
-            if (++writes > 2) throw new IOException("client closed the connection");
+            if (++writes > maxWrites) throw new IOException("client closed the connection");
         }
     }
 
-    @Test void aClientThatLeavesMidAnswerStillPaysForIt() throws Exception {
+    @Test void aClientThatLeavesMidAnswerStillPaysForIt() throws Exception { leaves(3, false); }
+
+    @Test void aClientThatLeavesAfterAFewWordsIsRefunded() throws Exception { leaves(1, true); }
+
+    private void leaves(int maxWrites, boolean refundExpected) throws Exception {
         var controller = new InterviewController();
         var identity = mock(IdentityResolverService.class);
         var credits = mock(FirestoreCreditsService.class);
@@ -101,9 +107,10 @@ class AnswerBillingTests {
         var request = new MockHttpServletRequest();
         request.setRemoteAddr("127.0.0.1");
         var result = controller.askQuestion(null, "test-device", request, Map.of("question", "Explain database indexes"));
-        result.getBody().writeTo(new WalksAway());
+        result.getBody().writeTo(new WalksAway(maxWrites));
         verify(credits, timeout(1000)).deductGuestCredits(eq("test-device"), anyInt(), any());
-        Thread.sleep(200);
-        verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any());
+        Thread.sleep(300);
+        if (refundExpected) verify(credits, times(1)).refundGuestCredits(eq("test-device"), anyInt(), any());
+        else verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any());
     }
 }

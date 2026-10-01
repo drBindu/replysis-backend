@@ -1333,6 +1333,7 @@ public class InterviewController {
         StringBuilder opening = new StringBuilder();
         List<String> held = new java.util.ArrayList<>();
         boolean released = false, delivered = false;
+        int contentChars = 0;   // characters of real answer that have reached the person
 
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body()))) {
             String line;
@@ -1358,9 +1359,9 @@ public class InterviewController {
                 }
 
                 if (released) {
-                    if (hasContentToken(line)) delivered = true;
                     outputStream.write((line + "\n\n").getBytes());
                     outputStream.flush();
+                    if (hasContentToken(line)) { delivered = true; contentChars += contentToken(line).length(); }
                     continue;
                 }
 
@@ -1368,6 +1369,7 @@ public class InterviewController {
                 if (hasContentToken(line)) {
                     delivered = true;
                     opening.append(contentToken(line));
+                    contentChars += contentToken(line).length();
                 }
                 if (opening.length() < REFUSAL_PROBE_CHARS) continue;
 
@@ -1383,8 +1385,8 @@ public class InterviewController {
             // pressed Space, or their network dropped. They received it, so it is delivered and charged.
             // This used to rethrow, the stream counted as undelivered, and the whole charge was refunded, so
             // anyone who cut the connection after the first sentence got every answer free.
-            if (released && delivered) {
-                System.out.println("[AI] Connection ended after the answer had started; counting it as delivered.");
+            if (released && delivered && contentChars >= INTERRUPTED_STILL_CHARGED_CHARS) {
+                System.out.println("[AI] Connection ended after " + contentChars + " characters had reached the person; counting it as delivered.");
                 return true;
             }
             throw interrupted;
@@ -1421,6 +1423,14 @@ public class InterviewController {
 
     /** How much of the answer to read before deciding it is a refusal. */
     private static final int REFUSAL_PROBE_CHARS = 64;
+
+    /**
+     * An answer cut off by the person (Space, a new question, a dropped connection) is charged only once this
+     * much of it has arrived, about two sentences. Below it they have not really been given an answer, so it is
+     * refunded; above it a refund would mean anyone could read the first lines of every answer and cut the
+     * connection to get them all free.
+     */
+    private static final int INTERRUPTED_STILL_CHARGED_CHARS = 120;
 
     /**
      * The screen request stripped of everything a model can object to. Used only
