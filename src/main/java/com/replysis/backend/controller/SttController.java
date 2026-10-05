@@ -152,7 +152,7 @@ public class SttController {
                 : creditsService.hasAudioTimeLeft(identity.uid());
         if (!hasAudioTime) {
             return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
-                    .body(Map.of("error", "You have reached this month's fair use limit for listening.",
+                    .body(Map.of("error", "You have reached this month's limit.",
                                  "reason", "audio-limit"));
         }
 
