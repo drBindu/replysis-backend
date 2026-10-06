@@ -858,6 +858,7 @@ public class InterviewController {
                 : creditsService.deductCredits(identity.uid(), ANSWER_COST, screenUsage);
         long chargeMs = System.currentTimeMillis() - chargeStart;
         if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
+        System.out.println("[SCREEN_TIME] charge=" + chargeMs + "ms mode=" + (textMode ? "text" : "picture"));
         if (!charged) {
             return ResponseEntity.status(402).build(); // Payment Required
         }
