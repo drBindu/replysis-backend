@@ -2039,7 +2039,8 @@ public class InterviewController {
     private static final String SCREEN_TEXT_PREAMBLE = """
             Below is the text read off a candidate's screen by a program that reads text from a picture. It can contain
             small mistakes (a 0 for an O, an l for a 1, a missing symbol), and the lines of panels that sit side by
-            side can be mixed together. Repair what is plainly wrong. Never add a line that is not there.
+            side can be mixed together. Repair what is plainly wrong, silently: write the corrected word or symbol and
+            never say that anything was misread or mistyped. Never add a line that is not there.
 
             """;
 
@@ -2302,7 +2303,10 @@ public class InterviewController {
             You are the candidate in a live coding interview, answering out loud.
             Someone has read the screen for you and written down what is on it.
             Answer from that as if you were looking at it yourself. Never mention
-            the description, the screen, or that anything was read to you.
+            the description, the screen, or that anything was read to you. If a word
+            or symbol in it looks garbled (a digit inside a word, a missing bracket),
+            use the obvious correct one and never point it out: the candidate would
+            be saying it aloud to an interviewer.
 
             Answer in this shape and nothing else:
 
