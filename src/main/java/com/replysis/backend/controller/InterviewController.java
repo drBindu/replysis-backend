@@ -562,7 +562,34 @@ public class InterviewController {
     private static final int    MAX_STASHED_PER_IDENTITY = 4;
     private static final long   MAX_STASHED_TOTAL_BYTES = 60L * 1024 * 1024;
 
-    private record StashedImage(String owner, String base64, long expiresAt) {}
+    // Words read off the screen by the app, sent instead of a picture when the connection cannot carry one.
+    private static final int    MAX_SCREEN_TEXT_CHARS = 24_000;
+    private static final int    MIN_SCREEN_TEXT_CHARS = 20;
+
+    // Reading a screen costs a model call, and one is started for every screen that is sent ahead, used or not. A
+    // person's screen changes a few times a minute at most, so this is far above real use and still a hard ceiling.
+    private static final int    SCREEN_PREREAD_PER_MINUTE = 6;
+
+    // How long a question waits for a read that is already under way before it starts its own.
+    private static final long   PREREAD_MAX_WAIT_MS = 6_000;
+
+    private static final String GENERIC_ASKED = "Analyze what is on the screen.";
+
+    private final java.util.concurrent.ThreadPoolExecutor preReadPool =
+            new java.util.concurrent.ThreadPoolExecutor(2, 4, 30, java.util.concurrent.TimeUnit.SECONDS,
+                    new java.util.concurrent.ArrayBlockingQueue<>(8),
+                    r -> { Thread t = new Thread(r, "screen-preread"); t.setDaemon(true); return t; },
+                    new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    // `read` is the screen read (stage one of a screen answer) started the moment the picture or the text arrived, so
+    // by the time the question is asked it is usually finished and the answer starts straight from it. Exactly one of
+    // base64 and text is normally present: text is what a slow connection sends instead of the picture.
+    private record StashedImage(String owner, String base64, String text, long expiresAt,
+                                java.util.concurrent.CompletableFuture<String> read) {
+        long size() {
+            return (base64 == null ? 0 : base64.length()) + (text == null ? 0 : text.length());
+        }
+    }
 
     private final java.util.Map<String, StashedImage> stashedImages =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -600,14 +627,25 @@ public class InterviewController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
 
         String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
-        if (image == null || image.isBlank() || !isBase64(image))
+        // What the app read off the screen, for a connection too slow to carry the picture. A few kilobytes.
+        String screenWords = text(payload.get("text"), MAX_SCREEN_TEXT_CHARS);
+
+        boolean haveImage = image != null && !image.isBlank();
+        boolean haveWords = screenWords != null && screenWords.length() >= MIN_SCREEN_TEXT_CHARS;
+        if (haveImage && !isBase64(image))
             return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
+        if (!haveImage && !haveWords)
+            return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
+        if (!haveImage) image = null;
+        if (!haveWords) screenWords = null;
 
         // Far larger than any real screenshot. Rejected rather than trimmed,
         // because something sending eight megabytes is not a screen capture.
-        if (image.length() > MAX_STASHED_IMAGE_CHARS)
+        if (image != null && image.length() > MAX_STASHED_IMAGE_CHARS)
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "screenshot too large to hold"));
+
+        final long entrySize = (image == null ? 0 : image.length()) + (screenWords == null ? 0 : screenWords.length());
 
         sweepStashedImages();
 
@@ -626,15 +664,16 @@ public class InterviewController {
         // And a ceiling across everyone, measured in bytes rather than count,
         // because count says nothing about memory.
         long held = stashedImages.values().stream()
-                .mapToLong(held2 -> held2.base64().length())
+                .mapToLong(StashedImage::size)
                 .sum();
-        if (held + image.length() > MAX_STASHED_TOTAL_BYTES)
+        if (held + entrySize > MAX_STASHED_TOTAL_BYTES)
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(Map.of("error", "too many screenshots held right now"));
 
         String id = java.util.UUID.randomUUID().toString();
-        stashedImages.put(id, new StashedImage(identityKey(identity), image,
-                System.currentTimeMillis() + STASHED_IMAGE_TTL_MS));
+        stashedImages.put(id, new StashedImage(identityKey(identity), image, screenWords,
+                System.currentTimeMillis() + STASHED_IMAGE_TTL_MS,
+                startPreRead(identity, image, screenWords)));
 
         return ResponseEntity.ok(Map.of("imageId", id, "expiresInMs", STASHED_IMAGE_TTL_MS));
     }
@@ -646,7 +685,7 @@ public class InterviewController {
      * leaked id worthless a moment later, and stops a stale screen being
      * answered twice.
      */
-    private String takeStashedImage(String id, RequestIdentity identity) {
+    private StashedImage takeStashed(String id, RequestIdentity identity) {
         if (id == null || id.isBlank()) return null;
         sweepStashedImages();
 
@@ -662,7 +701,7 @@ public class InterviewController {
         }
 
         stashedImages.remove(id);
-        return held.base64();
+        return held;
     }
 
     /** Same shape the rate limiter already uses, so one caller means one caller. */
@@ -677,15 +716,15 @@ public class InterviewController {
      * the whole request: three views with one missing still answers the
      * question better than refusing to answer at all.
      */
-    private List<String> takeStashedImages(Object raw, RequestIdentity identity) {
-        var found = new ArrayList<String>();
+    private List<StashedImage> takeStashedEntries(Object raw, RequestIdentity identity) {
+        var found = new ArrayList<StashedImage>();
         if (!(raw instanceof List<?> ids)) return found;
 
         for (Object id : ids) {
             if (found.size() >= MAX_IMAGES_PER_QUESTION) break;
             if (!(id instanceof String text) || text.isBlank()) continue;
-            String image = takeStashedImage(text, identity);
-            if (image != null) found.add(image);
+            StashedImage entry = takeStashed(text, identity);
+            if (entry != null) found.add(entry);
         }
         return found;
     }
@@ -711,17 +750,30 @@ public class InterviewController {
 
         // Ids of screenshots already sent, or the bytes inline as before.
         // Older builds send only the bytes and must keep working.
-        List<String> stashedImages = takeStashedImages(payload.get("imageIds"), identity);
+        List<StashedImage> taken = takeStashedEntries(payload.get("imageIds"), identity);
 
         String imageId = textOrEmpty(payload.get("imageId"), 64);
-        if (stashedImages.isEmpty() && imageId != null && !imageId.isBlank()) {
-            String one = takeStashedImage(imageId, identity);
-            if (one != null) stashedImages = List.of(one);
+        if (taken.isEmpty() && imageId != null && !imageId.isBlank()) {
+            StashedImage one = takeStashed(imageId, identity);
+            if (one != null) taken = List.of(one);
         }
+        final List<StashedImage> takenEntries = taken;
+        final List<String> stashedImages = taken.stream().map(StashedImage::base64)
+                .filter(java.util.Objects::nonNull).toList();
+        final List<String> stashedTexts = taken.stream().map(StashedImage::text)
+                .filter(java.util.Objects::nonNull).toList();
 
         String image = !stashedImages.isEmpty()
                 ? stashedImages.get(0)
                 : text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
+
+        // No picture, but the words read off the screen: what a connection too slow for a picture sends. The answer is
+        // written from those words exactly as it is from a picture's description, minus the time to upload a picture.
+        String inlineWords = text(payload.get("screenText"), MAX_SCREEN_TEXT_CHARS);
+        final boolean textMode = (image == null || image.isBlank())
+                && (!stashedTexts.isEmpty() || (inlineWords != null && inlineWords.length() >= MIN_SCREEN_TEXT_CHARS));
+        final String screenWords = !textMode ? ""
+                : joinScreenTexts(!stashedTexts.isEmpty() ? stashedTexts : List.of(inlineWords));
         String prompt = text(payload.get("prompt"), MAX_SCREEN_PROMPT_CHARS);
         String providerInput = textOrEmpty(payload.get("provider"), 20);
         if (providerInput == null) return rejectScreen("provider field was not usable text");
@@ -730,7 +782,7 @@ public class InterviewController {
         // now and selects nothing: every route in this file is Gemini.
         final String provider = providerInput.isBlank() ? "gemini" : providerInput.toLowerCase();
 
-        if (image == null || image.isBlank()) {
+        if (!textMode && (image == null || image.isBlank())) {
             // An id that resolved to nothing is worth naming: it means the
             // screenshot expired, or was already used, and the app should have
             // sent the bytes instead.
@@ -740,7 +792,7 @@ public class InterviewController {
         }
         if (prompt == null || prompt.isBlank())
             return rejectScreen("prompt missing, blank, or longer than " + MAX_SCREEN_PROMPT_CHARS + " chars");
-        if (!isBase64(image))
+        if (!textMode && !isBase64(image))
             return rejectScreen("image was not valid base64");
         // "openai" stays accepted for the same reason as "groq": installed Windows
         // builds send it for anyone who once chose GPT-4o. It is only a label now.
@@ -784,9 +836,11 @@ public class InterviewController {
         String fallbackModel    = SECOND_CHOICE_MODEL;
 
         final String finalImage  = image;
-        final List<String> finalImages = stashedImages.isEmpty()
-                ? List.of(image)
-                : List.copyOf(stashedImages);
+        final List<String> finalImages = textMode
+                ? List.<String>of()
+                : stashedImages.isEmpty()
+                    ? List.of(image)
+                    : List.copyOf(stashedImages);
         final String finalPrompt = prompt;
 
         final com.replysis.backend.service.UsageEventService.Context screenUsage =
@@ -831,9 +885,10 @@ public class InterviewController {
                 // stages draw on separate allowances rather than racing each
                 // other for one.
                 String screenRead;
+                final long answerStart = System.currentTimeMillis();
                 try {
-                    screenRead = readScreenForCoding(
-                            endpoint, apiKey, model, finalImages, finalPrompt);
+                    screenRead = obtainScreenRead(textMode, screenWords, endpoint, apiKey, model,
+                            finalImages, finalPrompt, takenEntries);
                 } catch (RateLimitedException limited) {
                     outputStream.write(rateLimitedEvent(limited.response).getBytes());
                     outputStream.flush();
@@ -928,7 +983,7 @@ public class InterviewController {
 
                     if (coded.statusCode() == 200) {
                         providerAccepted = true;
-                        answerDelivered = streamCodingAnswerCorrected(coded, outputStream);
+                        answerDelivered = streamCodingAnswerCorrected(coded, outputStream, answerStart);
                         if (answerDelivered) {
                             System.out.println("[SCREEN_PATH] answered by TWO-STAGE (" + codingModel + ")");
                             return;
@@ -936,6 +991,26 @@ public class InterviewController {
                     }
                     System.err.println("Coding stage unusable (" + codingModel + ", HTTP " + coded.statusCode()
                             + "); falling back to the vision model writing it.");
+                }
+
+                if (textMode) {
+                    // Words, not a picture: the answer is written straight from them. The two-stage path above did not
+                    // apply (not a coding question, or it could not read the words), and there is no image to fall
+                    // back to, so this is the whole of the single-stage path for this request.
+                    HttpResponse<java.io.InputStream> said = callTextScreenAnswer(screenWords, finalPrompt);
+                    if (said.statusCode() == 200) {
+                        providerAccepted = true;
+                        answerDelivered = streamUnlessRefused(said, outputStream, screenTokens);
+                    } else {
+                        System.err.println("Text screen answer failed: HTTP " + said.statusCode());
+                        outputStream.write(said.statusCode() == 429
+                                ? rateLimitedEvent(said).getBytes()
+                                : friendlyErrorEvent().getBytes());
+                        outputStream.flush();
+                    }
+                    System.out.println("[SCREEN_PATH] answered from TEXT single-stage, delivered=" + answerDelivered
+                            + " total=" + (System.currentTimeMillis() - answerStart) + "ms");
+                    return;
                 }
 
                 System.out.println("[SCREEN_PATH] answering by SINGLE-STAGE vision (" + model
@@ -1612,6 +1687,36 @@ public class InterviewController {
         }
     }
 
+    // What a screen read reports, in the six headings the answer stage works from. One template for a picture and
+    // for the words read off one, so the two cannot drift apart.
+    private static final String SCREEN_READ_TEMPLATE = """
+                Read this screen and report it. Do not solve anything, do not write code.
+
+                The interviewer just asked: %s
+
+                PROBLEM: the exact title and the full statement as written, including
+                every example and constraint you can see. Copy the wording; do not
+                summarise it. If the screen is not a coding problem, an editor, or an
+                error — a browser tab, a dashboard, anything ordinary — write "none:
+                not a coding screen" and say plainly what the screen actually is
+                instead. Never invent a problem to have one to report.
+                LANGUAGE: the language selected in the editor, or "none".
+                EXISTING CODE: the code currently in the editor, exactly as written,
+                or "none".
+                ERROR: any compile error, failed test or red message, with the exact
+                line number and text, or "none".
+                CONSTRAINTS: the constraints section of the problem, copied as
+                written — the bounds like "1 <= n <= 10^5". If no constraints
+                section is visible on the screen, write exactly "not visible".
+                Report only what is actually rendered: you will recognise most of
+                these problems and could recite their usual constraints from
+                memory, and doing that here is the one thing that makes this line
+                useless. If you cannot see it, it is not visible.
+                ASKED: repeat back the interviewer's question above, in one line.
+
+                Plain text under these six headings. Nothing else.
+                """;
+
     /**
      * Only coding screens are worth two stages.
      *
@@ -1639,7 +1744,12 @@ public class InterviewController {
     private String readScreenForCoding(String endpoint, String apiKey, String model,
                                        List<String> images, String prompt) {
         if (!looksLikeCoding(prompt)) return null;
+        return readScreen(endpoint, apiKey, model, images, actuallyAsked(prompt));
+    }
 
+    /** The screen read itself. Takes the interviewer's words as a parameter so it can run before they are spoken. */
+    private String readScreen(String endpoint, String apiKey, String model,
+                              List<String> images, String asked) {
         try {
             // The ASKED line used to be requested with nothing to put in it —
             // this method never received the real question, only the fixed
@@ -1655,33 +1765,7 @@ public class InterviewController {
             // required headings from nothing to fill them with. Confirmed
             // live: asked what website was open on a page with no code at
             // all, it invented a LeetCode problem to have something to report.
-            String extract = """
-                Read this screen and report it. Do not solve anything, do not write code.
-
-                The interviewer just asked: %s
-
-                PROBLEM: the exact title and the full statement as written, including
-                every example and constraint you can see. Copy the wording; do not
-                summarise it. If the screen is not a coding problem, an editor, or an
-                error — a browser tab, a dashboard, anything ordinary — write "none:
-                not a coding screen" and say plainly what the screen actually is
-                instead. Never invent a problem to have one to report.
-                LANGUAGE: the language selected in the editor, or "none".
-                EXISTING CODE: the code currently in the editor, exactly as written,
-                or "none".
-                ERROR: any compile error, failed test or red message, with the exact
-                line number and text, or "none".
-                CONSTRAINTS: the constraints section of the problem, copied as
-                written — the bounds like "1 <= n <= 10^5". If no constraints
-                section is visible on the screen, write exactly "not visible".
-                Report only what is actually rendered: you will recognise most of
-                these problems and could recite their usual constraints from
-                memory, and doing that here is the one thing that makes this line
-                useless. If you cannot see it, it is not visible.
-                ASKED: repeat back the interviewer's question above, in one line.
-
-                Plain text under these six headings. Nothing else.
-                """.formatted(actuallyAsked(prompt));
+            String extract = SCREEN_READ_TEMPLATE.formatted(asked);
 
             HttpResponse<java.io.InputStream> res = callVisionProvider(
                     endpoint, apiKey, model, buildVisionMessages(images, extract));
@@ -1767,54 +1851,247 @@ public class InterviewController {
      * on the same buffered text, so nothing about that behaviour changes.
      */
     private boolean streamCodingAnswerCorrected(HttpResponse<java.io.InputStream> response,
-                                                java.io.OutputStream outputStream) throws Exception {
+                                                java.io.OutputStream outputStream,
+                                                long requestStart) throws Exception {
+        // The spoken part (SAY THIS) goes out as it arrives; only the code is held until it is whole, because the
+        // signature correction below needs to see it all. What the candidate reads first is the spoken part, so the
+        // first word no longer waits for the code to be written. The first few words are still held long enough to
+        // tell a refusal, exactly as before, and a refusal still never reaches the screen.
         var whole = new StringBuilder();
+        int sent = 0;
+        boolean released = false;
+        int codeAt = -1;
+        boolean firstChunkLogged = false;
+
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(response.body(), java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (!line.startsWith("data: ")) continue;
                 String token = contentToken(line);
-                if (token != null) whole.append(token);
+                if (token == null || token.isEmpty()) continue;
+                whole.append(token);
+
+                if (!released) {
+                    if (whole.length() < REFUSAL_PROBE_CHARS) continue;
+                    if (looksLikeRefusal(whole.substring(0, REFUSAL_PROBE_CHARS))) return false;
+                    released = true;
+                }
+
+                if (codeAt < 0) codeAt = codeSectionStart(whole);
+                int safe = codeAt >= 0 ? codeAt : whole.length() - CODE_HOLDBACK;
+                if (safe > sent) {
+                    writeContentChunk(outputStream, whole.substring(sent, safe));
+                    sent = safe;
+                    if (!firstChunkLogged) {
+                        firstChunkLogged = true;
+                        System.out.println("[SCREEN_TIME] first words out " + (System.currentTimeMillis() - requestStart)
+                                + "ms after the request reached the answer stage");
+                    }
+                }
             }
         }
 
         String answer = whole.toString();
         if (answer.isBlank()) return false;
-        if (looksLikeRefusal(answer.substring(0, Math.min(REFUSAL_PROBE_CHARS, answer.length()))))
+        if (!released && looksLikeRefusal(answer.substring(0, Math.min(REFUSAL_PROBE_CHARS, answer.length()))))
             return false;
 
-        String corrected = fixPointerSignatureIfNeeded(answer);
+        // Whatever has not gone out yet: the code, and the tail of the spoken part that was held back.
+        String held = answer.substring(sent);
+        String corrected = fixPointerSignatureIfNeeded(held);
 
         // Always report the signature the user will actually paste, corrected or
         // not. Logging only the corrections left the failing case invisible:
         // when a real answer came back with a value-typed signature and no
         // correction line beside it, there was no way to tell whether the
-        // rewrite had run and found nothing, or never run at all — and the
+        // rewrite had run and found nothing, or never run at all - and the
         // difference is the whole bug. One line per answer removes that
         // ambiguity permanently.
-        String sigBefore = firstSignatureLine(answer);
+        String sigBefore = firstSignatureLine(held);
         String sigAfter = firstSignatureLine(corrected);
         System.out.println("[SCREEN_SIG] before=[" + sigBefore + "] after=[" + sigAfter + "]"
-                + " corrected=" + !corrected.equals(answer));
+                + " corrected=" + !corrected.equals(held));
 
         // A value-typed parameter that is still dereferenced after the rewrite
         // means the rewrite missed a shape it should have caught. That does not
-        // compile, so it is a defect and not a curiosity — say so loudly enough
+        // compile, so it is a defect and not a curiosity - say so loudly enough
         // that it is found by reading the log rather than by a user pasting it.
         if (sigAfter.matches(".*\\b(\\w+)\\s+\\w+\\s*\\([^)*]*\\).*")
                 && corrected.contains("->")) {
             System.out.println("[SCREEN_SIG] WARNING: signature still value-typed after rewrite "
-                    + "— this will not compile: " + sigAfter);
+                    + "- this will not compile: " + sigAfter);
         }
 
-        var chunk = Map.of("choices",
-                List.of(Map.of("delta", Map.of("content", corrected))));
-        outputStream.write(("data: " + mapper.writeValueAsString(chunk) + "\n\n").getBytes(
-                java.nio.charset.StandardCharsets.UTF_8));
+        if (!corrected.isEmpty()) writeContentChunk(outputStream, corrected);
         outputStream.write("data: [DONE]\n\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         outputStream.flush();
+        System.out.println("[SCREEN_TIME] answer complete " + (System.currentTimeMillis() - requestStart) + "ms");
         return true;
+    }
+
+    // Enough to cover a heading or a fence that arrives split across two tokens.
+    private static final int CODE_HOLDBACK = 12;
+
+    private static final java.util.regex.Pattern CODE_SECTION =
+            java.util.regex.Pattern.compile("(?m)^[ \\t]*(?:DETAIL\\b|```)");
+
+    /** Where the code part of an answer begins (the DETAIL heading or the first fence), or -1 while there is none yet. */
+    static int codeSectionStart(CharSequence text) {
+        java.util.regex.Matcher m = CODE_SECTION.matcher(text);
+        return m.find() ? m.start() : -1;
+    }
+
+    private void writeContentChunk(java.io.OutputStream out, String content) throws Exception {
+        var chunk = Map.of("choices", List.of(Map.of("delta", Map.of("content", content))));
+        out.write(("data: " + mapper.writeValueAsString(chunk) + "\n\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    /**
+     * Several views of one page as one text, oldest first. A line the previous view already ended with is not
+     * repeated where the next one begins, so a page scrolled a little reads as one page.
+     */
+    static String joinScreenTexts(List<String> parts) {
+        var out = new StringBuilder();
+        var seen = new java.util.HashSet<String>();
+        for (String part : parts) {
+            if (part == null || part.isBlank()) continue;
+            String[] lines = part.strip().split("\\R", -1);
+            int from = 0;
+            if (!seen.isEmpty()) {
+                while (from < lines.length
+                        && (lines[from].isBlank() || seen.contains(lines[from].strip()))) from++;
+            }
+            if (out.length() > 0) out.append('\n');
+            for (int i = from; i < lines.length; i++) out.append(lines[i]).append('\n');
+            for (String l : lines) if (l.strip().length() >= 3) seen.add(l.strip());
+        }
+        return out.toString().strip();
+    }
+
+    // ── The screen, read while the candidate is still speaking ─────────────────────────────────────────────
+    // A screen read (stage one) takes a second or more, and it used to start only when the question arrived, so the
+    // candidate waited for it. The screen is sent ahead of the question, so the read starts then, and by the time
+    // the question lands it is finished and the answer starts at once. The read does not depend on the question
+    // (the answer stage is given the spoken words itself), so it can be done before they exist.
+    private java.util.concurrent.CompletableFuture<String> startPreRead(
+            RequestIdentity identity, String image, String words) {
+        var future = new java.util.concurrent.CompletableFuture<String>();
+        boolean haveKey = (geminiApiKey != null && !geminiApiKey.isBlank())
+                || (words != null && cerebrasApiKey != null && !cerebrasApiKey.isBlank());
+        if (!haveKey || !rateLimiter.tryAcquire("screen-preread:identity:" + identityKey(identity),
+                SCREEN_PREREAD_PER_MINUTE, 60_000L)) {
+            future.complete(null);
+            return future;
+        }
+        try {
+            preReadPool.execute(() -> {
+                long t0 = System.currentTimeMillis();
+                try {
+                    String read = image != null
+                            ? readScreen(GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI, List.of(image), GENERIC_ASKED)
+                            : readScreenText(words, GENERIC_ASKED);
+                    System.out.println("[SCREEN_PREREAD] " + (image != null ? "picture" : "text") + " read in "
+                            + (System.currentTimeMillis() - t0) + "ms, chars=" + (read == null ? 0 : read.length()));
+                    future.complete(read);
+                } catch (Throwable e) {
+                    future.complete(null);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            future.complete(null);
+        }
+        return future;
+    }
+
+    /** Stage one for this question: the read that was started ahead if there is one, otherwise a fresh one. */
+    private String obtainScreenRead(boolean textMode, String screenWords, String endpoint, String apiKey, String model,
+                                    List<String> images, String prompt, List<StashedImage> taken) {
+        if (!looksLikeCoding(prompt)) return null;
+
+        long t0 = System.currentTimeMillis();
+        var preRead = taken.size() == 1 ? taken.get(0).read() : null;
+        if (preRead != null) {
+            try {
+                String ready = preRead.get(PREREAD_MAX_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (ready != null && !ready.isBlank()) {
+                    System.out.println("[SCREEN_TIME] read=ahead waited=" + (System.currentTimeMillis() - t0) + "ms");
+                    return ready;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception ignored) {
+                // Timed out or failed: read it now.
+            }
+        }
+
+        String asked = actuallyAsked(prompt);
+        String read = textMode
+                ? readScreenText(screenWords, asked)
+                : readScreen(endpoint, apiKey, model, images, asked);
+        System.out.println("[SCREEN_TIME] read=now mode=" + (textMode ? "text" : "picture")
+                + " took=" + (System.currentTimeMillis() - t0) + "ms");
+        return read;
+    }
+
+    private static final String SCREEN_TEXT_PREAMBLE = """
+            Below is the text read off a candidate's screen by a program that reads text from a picture. It can contain
+            small mistakes (a 0 for an O, an l for a 1, a missing symbol), and the lines of panels that sit side by
+            side can be mixed together. Repair what is plainly wrong. Never add a line that is not there.
+
+            """;
+
+    /** Stage one from words instead of a picture. Same six headings, from a fast text model. */
+    private String readScreenText(String screenWords, String asked) {
+        try {
+            String extract = SCREEN_TEXT_PREAMBLE + SCREEN_READ_TEMPLATE.formatted(asked)
+                    + "\n\nTHE SCREEN TEXT:\n" + screenWords;
+
+            boolean onCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
+            HttpResponse<java.io.InputStream> res = callAiProvider(
+                    onCerebras ? CEREBRAS_ENDPOINT : GEMINI_ENDPOINT,
+                    onCerebras ? cerebrasApiKey : geminiApiKey,
+                    onCerebras ? ANSWER_MODEL_CEREBRAS : VISION_MODEL_GEMINI,
+                    List.of(Map.of("role", "user", "content", extract)), CODING_STAGE_MAX_TOKENS);
+            if (res.statusCode() != 200) {
+                System.err.println("Screen text read failed: HTTP " + res.statusCode());
+                return null;
+            }
+
+            var text = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(res.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data: ")) continue;
+                    String token = contentToken(line);
+                    if (token != null) text.append(token);
+                    if (text.length() > 8_000) break;
+                }
+            }
+            String raw = text.toString().trim();
+            System.out.println("[SCREEN_READ] text chars=" + raw.length());
+            return raw.isEmpty() ? null : fixPointerSignatureIfNeeded(raw);
+        } catch (Exception e) {
+            System.err.println("Screen text read error: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** The whole answer from words alone, for a question that is not a coding problem (or when the read failed). */
+    private HttpResponse<java.io.InputStream> callTextScreenAnswer(String screenWords, String prompt) throws Exception {
+        boolean onCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
+        String content = prompt
+                + "\n\nThe screen could not be sent as a picture, so this is its text, read by a program that reads "
+                + "text from a picture. It can contain small errors, and the lines of panels that sit side by side "
+                + "can be mixed together. Answer from it as if you were looking at the screen. Never mention that "
+                + "this is text or that anything was read to you.\n\n" + screenWords;
+        return callAiProvider(
+                onCerebras ? CEREBRAS_ENDPOINT : GEMINI_ENDPOINT,
+                onCerebras ? cerebrasApiKey : geminiApiKey,
+                onCerebras ? ANSWER_MODEL_CEREBRAS : ANSWER_MODEL_GEMINI,
+                List.of(Map.of("role", "user", "content", content)), CODING_STAGE_MAX_TOKENS);
     }
 
     // A whole function-signature line: return type, name, parameter list.
