@@ -2,6 +2,7 @@ package com.replysis.backend.service;
 
 import com.google.firebase.cloud.FirestoreClient;
 import com.replysis.backend.controller.InterviewController;
+import com.replysis.backend.controller.SttController;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -46,14 +47,15 @@ public class ReadinessService {
     private static final long PROBE_TIMEOUT_MS = 9_000;
 
     @Autowired private InterviewController interview;
+    @Autowired private SttController stt;
 
-    @Value("${deepgram.api.key:}")     private String deepgramKey;
-    @Value("${speechmatics.api.key:}") private String speechmaticsKey;
     @Value("${firebase.enabled:false}") private boolean firebaseEnabled;
+    @Value("${readiness.website.url:https://replysis.com/}") private String websiteUrl;
 
     private final long startedAt = System.currentTimeMillis();
     private final Map<String, Probe> latest = new ConcurrentHashMap<>();
     private volatile long lastRoundAt = 0;
+    private int round = 0;
     private final ExecutorService pool = Executors.newFixedThreadPool(5, r -> {
         Thread t = new Thread(r, "readiness");
         t.setDaemon(true);
@@ -67,8 +69,13 @@ public class ReadinessService {
         jobs.put("answer_model", run(() -> fromMillis(interview.warmAnswerModel())));
         jobs.put("screen_model", run(() -> fromMillis(interview.warmScreenModel())));
         jobs.put("database", run(this::database));
-        jobs.put("speech", run(() -> reach("https://api.deepgram.com/v1/projects", "Token " + deepgramKey, deepgramKey)));
-        jobs.put("speech_backup", run(() -> reach("https://mp.speechmatics.com/", null, speechmaticsKey)));
+        jobs.put("website", run(() -> reach(websiteUrl)));
+        // Speech asks the providers for a real (free, throwaway) token, which is exactly what starting to listen does, so a revoked or
+        // exhausted key shows up here before a customer finds it. Once a minute is plenty to keep those connections open.
+        if (round++ % 2 == 0) {
+            jobs.put("speech", run(() -> fromMillis(stt.warmDeepgram())));
+            jobs.put("speech_backup", run(() -> fromMillis(stt.warmSpeechmatics())));
+        }
 
         jobs.forEach((name, job) -> {
             Probe result;
@@ -91,7 +98,7 @@ public class ReadinessService {
     public Map<String, Object> snapshot() {
         long now = System.currentTimeMillis();
         var systems = new LinkedHashMap<String, Object>();
-        for (String name : new String[]{"answer_model", "screen_model", "database", "speech", "speech_backup"}) {
+        for (String name : new String[]{"answer_model", "screen_model", "database", "speech", "speech_backup", "website"}) {
             Probe p = latest.get(name);
             if (p == null) {
                 systems.put(name, Map.of("state", "starting"));
@@ -124,27 +131,28 @@ public class ReadinessService {
         long at = System.currentTimeMillis();
         if (!firebaseEnabled) return new Probe(true, 0, "not set up here", at);
         try {
-            FirestoreClient.getFirestore().collection("_warmup").document("ping").get().get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            // A transaction, not a plain read: charging for an answer is a transaction, and that is the path that was 2.6 s when cold.
+            var db = FirestoreClient.getFirestore();
+            var ref = db.collection("_warmup").document("ping");
+            db.runTransaction(transaction -> transaction.get(ref).get()).get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             return new Probe(true, System.currentTimeMillis() - at, "", at);
         } catch (Exception e) {
             return new Probe(false, System.currentTimeMillis() - at, "the database did not answer", at);
         }
     }
 
-    /** A free reachability check. Any answer short of a server error means the provider is up and we can talk to it. */
-    private Probe reach(String url, String authorization, String key) {
+    /** The public website, through the same front door a visitor uses. Any answer short of a server error means it is up. */
+    private Probe reach(String url) {
         long at = System.currentTimeMillis();
-        if (key == null || key.isBlank()) return new Probe(true, 0, "not set up here", at);
         try {
-            var request = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofMillis(PROBE_TIMEOUT_MS)).GET();
-            if (authorization != null) request.header("Authorization", authorization);
-            var reply = http.send(request.build(), HttpResponse.BodyHandlers.discarding());
+            var request = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofMillis(PROBE_TIMEOUT_MS)).GET().build();
+            var reply = http.send(request, HttpResponse.BodyHandlers.discarding());
             long ms = System.currentTimeMillis() - at;
             return reply.statusCode() < 500
                     ? new Probe(true, ms, "", at)
-                    : new Probe(false, ms, "provider answered " + reply.statusCode(), at);
+                    : new Probe(false, ms, "the website answered " + reply.statusCode(), at);
         } catch (Exception e) {
-            return new Probe(false, System.currentTimeMillis() - at, "could not reach the provider", at);
+            return new Probe(false, System.currentTimeMillis() - at, "could not reach the website", at);
         }
     }
 }

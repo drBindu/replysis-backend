@@ -187,6 +187,11 @@ public class SttController {
         }
 
         // 5. Mint a short-lived temporary token — the master key stays server-side
+        //
+        // Both providers are asked at once. They used to be asked one after the other (Speechmatics, then Deepgram), so the
+        // person waiting to start listening paid for both round trips added together; now they pay for the slower one.
+        java.util.concurrent.CompletableFuture<String> deepgramNow =
+                java.util.concurrent.CompletableFuture.supplyAsync(this::mintDeepgramToken);
         try {
             HttpRequest mintRequest = HttpRequest.newBuilder()
                     .uri(URI.create("https://mp.speechmatics.com/v1/api_keys?type=rt"))
@@ -223,7 +228,7 @@ public class SttController {
             Map<String, Object> body = new java.util.HashMap<>();
             body.put("key", tempKey);
             body.put("expiresIn", TOKEN_TTL_SECONDS);
-            String deepgramToken = mintDeepgramToken();
+            String deepgramToken = deepgramNow.join();
             if (deepgramToken != null) body.put("deepgramToken", deepgramToken);
 
             System.out.println("[STT] Issued temporary SM token (ttl=" + TOKEN_TTL_SECONDS
@@ -278,6 +283,37 @@ public class SttController {
         } catch (Exception e) {
             System.err.println("[STT] Deepgram grant error: " + e.getClass().getSimpleName());
             return null;
+        }
+    }
+
+    // ── Keeping the speech start warm ────────────────────────────────────────
+    // Starting to listen asks both providers for a token over THIS client's connections. A connection a provider has closed for
+    // being idle costs a new handshake on the next real start, which is the moment somebody is waiting. ReadinessService calls
+    // these once a minute so the connections stay open and the path stays compiled. A token made here is thrown away unused;
+    // both providers issue them at no charge.
+    /** Milliseconds for a Deepgram token request, -1 if it failed, -2 if Deepgram is not set up here. */
+    public long warmDeepgram() {
+        if (deepgramApiKey == null || deepgramApiKey.isBlank()) return -2;
+        long started = System.currentTimeMillis();
+        return mintDeepgramToken() != null ? System.currentTimeMillis() - started : -1;
+    }
+
+    /** Milliseconds for a Speechmatics token request, -1 if it failed, -2 if Speechmatics is not set up here. */
+    public long warmSpeechmatics() {
+        if (speechmaticsApiKey == null || speechmaticsApiKey.isBlank()) return -2;
+        long started = System.currentTimeMillis();
+        try {
+            HttpRequest mint = HttpRequest.newBuilder()
+                    .uri(URI.create("https://mp.speechmatics.com/v1/api_keys?type=rt"))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + speechmaticsApiKey)
+                    .timeout(Duration.ofSeconds(8))
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"ttl\": 60}"))
+                    .build();
+            HttpResponse<String> reply = httpClient.send(mint, HttpResponse.BodyHandlers.ofString());
+            return reply.statusCode() >= 200 && reply.statusCode() < 300 ? System.currentTimeMillis() - started : -1;
+        } catch (Exception e) {
+            return -1;
         }
     }
 

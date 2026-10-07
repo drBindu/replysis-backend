@@ -184,8 +184,21 @@ public class InterviewController {
         try {
             var reply = callAiProvider(endpoint, apiKey, model,
                     List.of(Map.of("role", "user", "content", "Reply with the single word ready.")), 24);
-            try (var body = reply.body()) {
-                body.readAllBytes();
+            // Read it the way a real answer is read (line by line, through the same parsers) so that path stays warm as well.
+            if (reply.statusCode() == 200) {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(reply.body(), java.nio.charset.StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (!line.startsWith("data: ")) continue;
+                        contentToken(line);
+                        usageTokens(line);
+                    }
+                }
+            } else {
+                try (var body = reply.body()) {
+                    body.readAllBytes();
+                }
             }
             return reply.statusCode() == 200 ? System.currentTimeMillis() - started : -1;
         } catch (Exception e) {
