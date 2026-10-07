@@ -164,6 +164,35 @@ public class InterviewController {
             .connectTimeout(Duration.ofSeconds(15))
             .build();
 
+    // ── Keeping the models warm ──────────────────────────────────────────────
+    // A connection to a provider that has been idle is closed by the provider, and the next real question then pays for a new
+    // handshake (and, on a quiet server, a cold code path) on top of the model's own time. One tiny real request every half
+    // minute, made through the SAME client the answers use, keeps those connections open. It costs a few tokens (well under
+    // a cent a day) and spends no customer's answers. Called by ReadinessService; returns milliseconds, or a negative code:
+    // -1 the request failed, -2 that provider is not configured here.
+    public long warmAnswerModel() {
+        return warmOnce(CEREBRAS_ENDPOINT, cerebrasApiKey, ANSWER_MODEL_CEREBRAS);
+    }
+
+    public long warmScreenModel() {
+        return warmOnce(GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI);
+    }
+
+    private long warmOnce(String endpoint, String apiKey, String model) {
+        if (apiKey == null || apiKey.isBlank()) return -2;
+        long started = System.currentTimeMillis();
+        try {
+            var reply = callAiProvider(endpoint, apiKey, model,
+                    List.of(Map.of("role", "user", "content", "Reply with the single word ready.")), 24);
+            try (var body = reply.body()) {
+                body.readAllBytes();
+            }
+            return reply.statusCode() == 200 ? System.currentTimeMillis() - started : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     // ── GET /api/v1/interview/credits ────────────────────────────────────────
     // Returns current credit balance for the authenticated user, or — with no
     // Authorization header but an X-Device-Id header instead — the free guest

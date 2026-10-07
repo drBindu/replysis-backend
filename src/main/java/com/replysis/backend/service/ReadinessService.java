@@ -1,0 +1,150 @@
+package com.replysis.backend.service;
+
+import com.google.firebase.cloud.FirestoreClient;
+import com.replysis.backend.controller.InterviewController;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Keeps everything an answer depends on warm, and records how each part answered, so "is it awake?" has a real answer.
+ *
+ * Every half minute it makes one tiny request to each part: the answer model, the screen model, the database, and the two
+ * speech providers. That does two jobs. It holds the connections open, so the first question after a quiet hour is as fast as
+ * the hundredth. And it measures, so the admin page can show each part as awake, slow or down, with how long it took, instead of
+ * finding out from a customer.
+ *
+ * What it costs: a few tokens per request on the two models (under a cent a day), two small database reads a minute, and free
+ * reachability checks on the speech providers. Speech itself is billed by audio, not by an open connection, so it needs nothing.
+ */
+@Configuration
+@EnableScheduling
+@ConditionalOnProperty(name = "readiness.enabled", havingValue = "true", matchIfMissing = true)
+public class ReadinessService {
+
+    /** One part's latest result. ms is how long the check took; ok false means it failed or timed out. */
+    public record Probe(boolean ok, long ms, String note, long at) {}
+
+    // Anything slower than this still works but is called out, because it is what a customer would feel.
+    private static final long SLOW_MS = 2_500;
+    private static final long PROBE_TIMEOUT_MS = 9_000;
+
+    @Autowired private InterviewController interview;
+
+    @Value("${deepgram.api.key:}")     private String deepgramKey;
+    @Value("${speechmatics.api.key:}") private String speechmaticsKey;
+    @Value("${firebase.enabled:false}") private boolean firebaseEnabled;
+
+    private final long startedAt = System.currentTimeMillis();
+    private final Map<String, Probe> latest = new ConcurrentHashMap<>();
+    private volatile long lastRoundAt = 0;
+    private final ExecutorService pool = Executors.newFixedThreadPool(5, r -> {
+        Thread t = new Thread(r, "readiness");
+        t.setDaemon(true);
+        return t;
+    });
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(6)).build();
+
+    @Scheduled(initialDelay = 4_000, fixedDelay = 30_000)
+    public void keepWarm() {
+        var jobs = new LinkedHashMap<String, CompletableFuture<Probe>>();
+        jobs.put("answer_model", run(() -> fromMillis(interview.warmAnswerModel())));
+        jobs.put("screen_model", run(() -> fromMillis(interview.warmScreenModel())));
+        jobs.put("database", run(this::database));
+        jobs.put("speech", run(() -> reach("https://api.deepgram.com/v1/projects", "Token " + deepgramKey, deepgramKey)));
+        jobs.put("speech_backup", run(() -> reach("https://mp.speechmatics.com/", null, speechmaticsKey)));
+
+        jobs.forEach((name, job) -> {
+            Probe result;
+            try {
+                result = job.get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                result = new Probe(false, PROBE_TIMEOUT_MS, "no answer in " + PROBE_TIMEOUT_MS / 1000 + " s", System.currentTimeMillis());
+            }
+
+            Probe before = latest.put(name, result);
+            // Say it once when a part changes state, not every half minute.
+            if (before == null || before.ok() != result.ok()) {
+                System.out.println("[READY] " + name + (result.ok() ? " is awake (" + result.ms() + "ms)" : " is DOWN: " + result.note()));
+            }
+        });
+        lastRoundAt = System.currentTimeMillis();
+    }
+
+    /** What the status endpoint returns: the latest result of each part, how old it is, and how long this instance has been up. */
+    public Map<String, Object> snapshot() {
+        long now = System.currentTimeMillis();
+        var systems = new LinkedHashMap<String, Object>();
+        for (String name : new String[]{"answer_model", "screen_model", "database", "speech", "speech_backup"}) {
+            Probe p = latest.get(name);
+            if (p == null) {
+                systems.put(name, Map.of("state", "starting"));
+                continue;
+            }
+            String state = !p.ok() ? "down" : p.ms() >= SLOW_MS ? "slow" : "awake";
+            systems.put(name, Map.of("state", state, "ms", p.ms(), "note", p.note() == null ? "" : p.note(), "ageMs", now - p.at()));
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("now", now);
+        out.put("lastRoundAt", lastRoundAt);
+        out.put("roundAgeMs", lastRoundAt == 0 ? -1 : now - lastRoundAt);
+        out.put("uptimeSeconds", (now - startedAt) / 1000);
+        out.put("systems", systems);
+        return out;
+    }
+
+    private CompletableFuture<Probe> run(java.util.function.Supplier<Probe> work) {
+        return CompletableFuture.supplyAsync(work, pool);
+    }
+
+    private static Probe fromMillis(long ms) {
+        long at = System.currentTimeMillis();
+        if (ms == -2) return new Probe(true, 0, "not set up here", at);
+        if (ms < 0)   return new Probe(false, 0, "the request failed", at);
+        return new Probe(true, ms, "", at);
+    }
+
+    private Probe database() {
+        long at = System.currentTimeMillis();
+        if (!firebaseEnabled) return new Probe(true, 0, "not set up here", at);
+        try {
+            FirestoreClient.getFirestore().collection("_warmup").document("ping").get().get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return new Probe(true, System.currentTimeMillis() - at, "", at);
+        } catch (Exception e) {
+            return new Probe(false, System.currentTimeMillis() - at, "the database did not answer", at);
+        }
+    }
+
+    /** A free reachability check. Any answer short of a server error means the provider is up and we can talk to it. */
+    private Probe reach(String url, String authorization, String key) {
+        long at = System.currentTimeMillis();
+        if (key == null || key.isBlank()) return new Probe(true, 0, "not set up here", at);
+        try {
+            var request = HttpRequest.newBuilder().uri(URI.create(url)).timeout(Duration.ofMillis(PROBE_TIMEOUT_MS)).GET();
+            if (authorization != null) request.header("Authorization", authorization);
+            var reply = http.send(request.build(), HttpResponse.BodyHandlers.discarding());
+            long ms = System.currentTimeMillis() - at;
+            return reply.statusCode() < 500
+                    ? new Probe(true, ms, "", at)
+                    : new Probe(false, ms, "provider answered " + reply.statusCode(), at);
+        } catch (Exception e) {
+            return new Probe(false, System.currentTimeMillis() - at, "could not reach the provider", at);
+        }
+    }
+}
