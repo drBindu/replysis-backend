@@ -55,6 +55,8 @@ public class ReadinessService {
 
     @Autowired private InterviewController interview;
     @Autowired private SttController stt;
+    // Tells the owner by email. Absent when the class is built by hand in a test.
+    @Autowired(required = false) private AlertService alerts;
 
     @Value("${firebase.enabled:false}") private boolean firebaseEnabled;
     /** The two models are asked on every Nth round (6 x 5 s = 30 s). 1 means every round. */
@@ -67,6 +69,24 @@ public class ReadinessService {
     private final Map<String, Probe> latest = new ConcurrentHashMap<>();
     /** How many checks in a row each part has missed. */
     private final Map<String, Integer> misses = new ConcurrentHashMap<>();
+    /** Parts this instance has announced as down, so it announces them coming back. */
+    private final java.util.Set<String> announcedDown = ConcurrentHashMap.newKeySet();
+
+    private static final Map<String, String> LABEL = Map.of(
+            "answer_model", "Answers",
+            "screen_model", "Screen reading",
+            "database", "Accounts and credits",
+            "speech", "Speech",
+            "speech_backup", "Speech backup",
+            "website", "Website");
+
+    private static final Map<String, String> CUSTOMERS_FEEL = Map.of(
+            "answer_model", "People asking for an answer will wait or get an error.",
+            "screen_model", "Screen questions will fail or come back late.",
+            "database", "Sign in, credits and charging for answers may fail, so answers may be refused.",
+            "speech", "Live listening may not start or may be slow to start. The backup may cover it.",
+            "speech_backup", "Nothing is broken for customers yet, but if Speech also fails there is no cover.",
+            "website", "replysis.com is not answering, so downloads, sign in and checkout are affected.");
     private volatile long lastRoundAt = 0;
     private int round = 0;
     private final ExecutorService pool = Executors.newFixedThreadPool(5, r -> {
@@ -114,6 +134,7 @@ public class ReadinessService {
             } else if (!before.ok()) {
                 System.out.println("[READY] " + name + " is awake again (" + result.ms() + "ms)");
             }
+            tellTheOwner(name, result, missed);
         });
         lastRoundAt = System.currentTimeMillis();
     }
@@ -141,6 +162,23 @@ public class ReadinessService {
         out.put("uptimeSeconds", (now - startedAt) / 1000);
         out.put("systems", systems);
         return out;
+    }
+
+    /** Down for two checks in a row raises an alert (and a reminder every half hour); coming back sends one message. */
+    private void tellTheOwner(String name, Probe result, int missed) {
+        if (alerts == null) return;
+        String label = LABEL.getOrDefault(name, name);
+        if (!result.ok() && missed >= DOWN_AFTER_MISSES) {
+            announcedDown.add(name);
+            alerts.raise("part-" + name, "Replysis: " + label + " is down",
+                    label + " is not responding (" + (result.note() == null || result.note().isBlank() ? "no reason given" : result.note()) + ").\n\n"
+                            + CUSTOMERS_FEEL.getOrDefault(name, "") + "\n\n"
+                            + "Look: https://replysis.com/admin (the Live panel shows each part).\n"
+                            + "I will write again when it is back, or every 30 minutes while it is still down.");
+        } else if (result.ok() && announcedDown.remove(name)) {
+            alerts.recovered("part-" + name, "Replysis: " + label + " is back",
+                    label + " is answering again (" + result.ms() + " ms).");
+        }
     }
 
     /**

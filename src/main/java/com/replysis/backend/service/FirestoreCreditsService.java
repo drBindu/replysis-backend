@@ -475,6 +475,17 @@ public class FirestoreCreditsService {
         return sb.toString();
     }
 
+    // An answer that was charged for and then not delivered is the clearest sign something is failing for customers.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private AlertService alerts;
+
+    private void noteRefund() {
+        if (alerts == null) return;
+        alerts.noteFailure("refunds", 3, 10 * 60_000L, "Replysis: answers are failing",
+                "Answers were charged and then could not be delivered, so the credits were given back.\n\n"
+                        + "Customers are seeing an error or no answer. Look: https://replysis.com/admin (Live panel, Problems).");
+    }
+
     public void refundCredits(String uid) {
         refundCredits(uid, INTERVIEW_QUESTION_COST, null);
     }
@@ -485,6 +496,7 @@ public class FirestoreCreditsService {
 
     public void refundCredits(String uid, int cost, UsageEventService.Context context) {
         if (cost <= 0) return;
+        noteRefund();
         try {
             Firestore db = FirestoreClient.getFirestore();
             DocumentReference ref = db.collection("users").document(uid);
@@ -654,6 +666,7 @@ public class FirestoreCreditsService {
 
     public void refundGuestCredits(String deviceId, int cost, UsageEventService.Context context) {
         if (cost <= 0) return;
+        noteRefund();
         try {
             Firestore db = FirestoreClient.getFirestore();
             DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);

@@ -41,6 +41,7 @@ public class DiagnosticsController {
     private static final Pattern CONTROL = Pattern.compile("[\\r\\n\\t\\p{Cntrl}]+");
 
     @Autowired private SimpleRateLimiter rateLimiter;
+    @Autowired(required = false) private com.replysis.backend.service.AlertService alerts;
 
     @PostMapping("/client-error")
     public ResponseEntity<?> clientError(@RequestBody(required = false) Map<String, Object> body,
@@ -69,6 +70,12 @@ public class DiagnosticsController {
                 + " msg=\"" + message + "\""
                 + " frames=\"" + frames + "\"");
         record(version, os, source, type, message, frames);
+        if (alerts != null) {
+            alerts.noteFailure("app-errors", 5, 10 * 60_000L, "Replysis: apps are reporting errors",
+                    "Desktop apps are reporting errors on customers' computers.\n\nThe latest: version " + version + ", " + type
+                            + (message.isEmpty() ? "" : " (" + message + ")") + ".\n\n"
+                            + "Look: https://replysis.com/admin (Live panel, Problems).");
+        }
         return ResponseEntity.noContent().build();
     }
 
