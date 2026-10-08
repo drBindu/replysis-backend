@@ -1,6 +1,7 @@
 package com.replysis.backend.security;
 
 import com.google.firebase.auth.FirebaseToken;
+import com.replysis.backend.service.AppSeenService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -22,11 +23,16 @@ public class IdentityResolverService {
     @Autowired
     private FirebaseAuthService firebaseAuthService;
 
+    // Only labels who uses which app for the admin page; never part of any decision, and absent in tests.
+    @Autowired(required = false)
+    private AppSeenService appSeen;
+
     public RequestIdentity resolve(String authHeader, String deviceIdHeader) {
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             try {
                 String token = authHeader.substring("Bearer ".length()).trim();
                 FirebaseToken decoded = firebaseAuthService.verify(token);
+                if (appSeen != null) appSeen.note("users", decoded.getUid(), AppInfo.current());
                 return new RequestIdentity(decoded.getUid(), null);
             } catch (Exception e) {
                 System.err.println("Token verification failed: " + e.getMessage());
@@ -40,6 +46,7 @@ public class IdentityResolverService {
                 System.err.println("Rejected malformed device ID");
                 return null;
             }
+            if (appSeen != null) appSeen.note("anon_devices", deviceId, AppInfo.current());
             return new RequestIdentity(null, deviceId);
         }
         return null;

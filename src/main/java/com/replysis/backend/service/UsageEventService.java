@@ -102,6 +102,8 @@ public class UsageEventService {
         final String eventId  = context == null || context.eventId() == null
                 ? java.util.UUID.randomUUID().toString() : context.eventId();
         final Instant now     = Instant.now();
+        // Read here, on the request's own thread: the worker below has no request to read it from.
+        final com.replysis.backend.security.AppInfo app = com.replysis.backend.security.AppInfo.current();
 
         int queued = writer.getQueue().size();
         if (queued >= 512) { dropped++; return; }
@@ -118,6 +120,10 @@ public class UsageEventService {
                     row.put("model", model);
                     row.put("credits", credits);
                     row.put("refund", credits < 0);
+                    if (app != null) {
+                        row.put("platform", app.platform());
+                        row.put("appVersion", app.version());
+                    }
                     // Server timestamp, not the Instant captured above. The
                     // Firestore Java client has no mapping for java.time.Instant
                     // and writing one throws at serialization time, which on this
