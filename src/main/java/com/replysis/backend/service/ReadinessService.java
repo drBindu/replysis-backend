@@ -50,6 +50,8 @@ public class ReadinessService {
     // Anything slower than this still works but is called out, because it is what a customer would feel.
     private static final long SLOW_MS = 2_500;
     private static final long PROBE_TIMEOUT_MS = 9_000;
+    /** A part is only called down after this many checks in a row fail. */
+    static final int DOWN_AFTER_MISSES = 2;
 
     @Autowired private InterviewController interview;
     @Autowired private SttController stt;
@@ -63,6 +65,8 @@ public class ReadinessService {
 
     private final long startedAt = System.currentTimeMillis();
     private final Map<String, Probe> latest = new ConcurrentHashMap<>();
+    /** How many checks in a row each part has missed. */
+    private final Map<String, Integer> misses = new ConcurrentHashMap<>();
     private volatile long lastRoundAt = 0;
     private int round = 0;
     private final ExecutorService pool = Executors.newFixedThreadPool(5, r -> {
@@ -98,9 +102,17 @@ public class ReadinessService {
             }
 
             Probe before = latest.put(name, result);
-            // Say it once when a part changes state, not on every round.
-            if (before == null || before.ok() != result.ok()) {
-                System.out.println("[READY] " + name + (result.ok() ? " is awake (" + result.ms() + "ms)" : " is DOWN: " + result.note()));
+            int missed = result.ok() ? 0 : misses.merge(name, 1, Integer::sum);
+            if (result.ok()) misses.put(name, 0);
+
+            // Say it when a part changes state, not on every round. One missed check is mentioned but is not yet "down".
+            if (!result.ok()) {
+                if (missed == 1) System.out.println("[READY] " + name + " missed one check: " + result.note() + " (down only if the next one also fails)");
+                else if (missed == DOWN_AFTER_MISSES) System.out.println("[READY] " + name + " is DOWN: " + result.note());
+            } else if (before == null) {
+                System.out.println("[READY] " + name + " is awake (" + result.ms() + "ms)");
+            } else if (!before.ok()) {
+                System.out.println("[READY] " + name + " is awake again (" + result.ms() + "ms)");
             }
         });
         lastRoundAt = System.currentTimeMillis();
@@ -116,8 +128,11 @@ public class ReadinessService {
                 systems.put(name, Map.of("state", "starting"));
                 continue;
             }
-            String state = !p.ok() ? "down" : p.ms() >= SLOW_MS ? "slow" : "awake";
-            systems.put(name, Map.of("state", state, "ms", p.ms(), "note", p.note() == null ? "" : p.note(), "ageMs", now - p.at()));
+            int missed = misses.getOrDefault(name, 0);
+            String state = stateOf(p, missed);
+            String note = p.note() == null ? "" : p.note();
+            if (!p.ok() && missed < DOWN_AFTER_MISSES) note = "one check missed, checking again" + (note.isEmpty() ? "" : " (" + note + ")");
+            systems.put(name, Map.of("state", state, "ms", p.ms(), "note", note, "ageMs", now - p.at()));
         }
         var out = new LinkedHashMap<String, Object>();
         out.put("now", now);
@@ -126,6 +141,15 @@ public class ReadinessService {
         out.put("uptimeSeconds", (now - startedAt) / 1000);
         out.put("systems", systems);
         return out;
+    }
+
+    /**
+     * awake, slow or down. A single missed check is shown as slow, not down: one provider hiccup is not an outage, and a red "down"
+     * that clears itself a minute later teaches the owner to stop believing the panel. Two misses in a row are down.
+     */
+    static String stateOf(Probe p, int missed) {
+        if (!p.ok()) return missed >= DOWN_AFTER_MISSES ? "down" : "slow";
+        return p.ms() >= SLOW_MS ? "slow" : "awake";
     }
 
     private CompletableFuture<Probe> run(java.util.function.Supplier<Probe> work) {

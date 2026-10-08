@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 public class AppSeenService {
 
     private static final long REWRITE_MS = 10 * 60_000L;
+    private static final long PRESENCE_REWRITE_MS = 25_000L;
     private static final int  REMEMBER_AT_MOST = 20_000;
 
     private record Seen(String platform, String version, long at) {}
@@ -39,9 +40,10 @@ public class AppSeenService {
     private boolean firebaseEnabled;
 
     private final ConcurrentHashMap<String, Seen> seen = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> presenceAt = new ConcurrentHashMap<>();
 
     private final ThreadPoolExecutor writer = new ThreadPoolExecutor(
-            1, 1, 60L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(256),
+            2, 2, 60L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(256),
             runnable -> {
                 Thread t = new Thread(runnable, "app-seen");
                 t.setDaemon(true);
@@ -71,6 +73,55 @@ public class AppSeenService {
             writer.execute(() -> write(collection, docId, info));
         } catch (Exception ignored) {
             // The queue is closed or full; the next request tries again after the interval.
+        }
+    }
+
+    /**
+     * This person has this surface open right now: the app named by info, or the website when info is null.
+     *
+     * Apps and the website all write the same lastActive field, so that field says somebody is here and not where. This is the
+     * where: an app (or the open website tab) pings once a minute, and the server writes lastAppAt (with the platform and version)
+     * or lastWebAt. A surface that was closed simply stops pinging and ages out. At most one write per person per surface every
+     * twenty-five seconds, update-only, never blocking the request.
+     */
+    public void presence(String uid, AppInfo info) {
+        if (uid == null || uid.isBlank() || !firebaseEnabled) return;
+
+        String key = uid + "/" + (info == null ? "web" : info.platform());
+        long now = System.currentTimeMillis();
+        Long before = presenceAt.get(key);
+        if (before != null && now - before < PRESENCE_REWRITE_MS) return;
+
+        if (presenceAt.size() >= REMEMBER_AT_MOST) presenceAt.clear();
+        presenceAt.put(key, now);
+
+        try {
+            writer.execute(() -> writePresence(uid, info));
+        } catch (Exception ignored) {
+            // The queue is closed or full; the next ping tries again.
+        }
+    }
+
+    /** The fields one presence ping writes. Separate so a test can see exactly what lands on the document. */
+    static Map<String, Object> presenceFields(AppInfo info) {
+        Map<String, Object> fields = new HashMap<>();
+        if (info == null) {
+            fields.put("lastWebAt", FieldValue.serverTimestamp());
+        } else {
+            fields.put("lastPlatform", info.platform());
+            fields.put("lastAppVersion", info.version());
+            fields.put("lastAppSeenAt", FieldValue.serverTimestamp());
+            fields.put("lastAppAt", FieldValue.serverTimestamp());
+        }
+        return fields;
+    }
+
+    private void writePresence(String uid, AppInfo info) {
+        try {
+            FirestoreClient.getFirestore().collection("users").document(uid)
+                    .update(presenceFields(info)).get(8, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+            // No document yet, or the database was slow. The next ping tries again.
         }
     }
 

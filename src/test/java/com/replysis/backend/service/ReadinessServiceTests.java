@@ -22,4 +22,18 @@ class ReadinessServiceTests {
         assertEquals(-1L, snapshot.get("roundAgeMs"), "no round has finished yet");
         assertTrue(((Number) snapshot.get("uptimeSeconds")).longValue() >= 0);
     }
+
+    @Test
+    void oneMissedCheckIsSlowAndTwoInARowAreDown() {
+        var missed = new ReadinessService.Probe(false, 9000, "no answer in 9 s", 0);
+        assertEquals("slow", ReadinessService.stateOf(missed, 1), "one hiccup is not an outage");
+        assertEquals("down", ReadinessService.stateOf(missed, 2), "two in a row is");
+        assertEquals("down", ReadinessService.stateOf(missed, 7));
+    }
+
+    @Test
+    void aPassingCheckIsAwakeUnlessItWasSlow() {
+        assertEquals("awake", ReadinessService.stateOf(new ReadinessService.Probe(true, 120, "", 0), 0));
+        assertEquals("slow", ReadinessService.stateOf(new ReadinessService.Probe(true, 3000, "", 0), 0));
+    }
 }
