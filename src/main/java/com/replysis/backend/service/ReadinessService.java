@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit;
  * the hundredth. And it measures, so the admin page can show each part as awake, slow or down, with how long it took, instead of
  * finding out from a customer.
  *
- * What it costs: a few tokens per request on the two models (under a cent a day), two small database reads a minute, and free
+ * What it costs: a few tokens per request on the two models (under a cent a day), a small database check every five seconds (about seventeen thousand a day), and free
  * reachability checks on the speech providers. Speech itself is billed by audio, not by an open connection, so it needs nothing.
  */
 @Configuration
