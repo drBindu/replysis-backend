@@ -26,8 +26,13 @@ import java.util.concurrent.TimeUnit;
 /**
  * Keeps everything an answer depends on warm, and records how each part answered, so "is it awake?" has a real answer.
  *
- * Every half minute it makes one tiny request to each part: the answer model, the screen model, the database, and the two
- * speech providers. That does two jobs. It holds the connections open, so the first question after a quiet hour is as fast as
+ * A round runs every five seconds (readiness.round.ms). Each round checks the database and the website. Every sixth round (half a
+ * minute) it also makes one tiny request to each model, and every twelfth (a minute) one to each speech provider. The owner asked
+ * for five seconds across the board; the two models and the speech tokens are deliberately not asked that often by default, because
+ * their providers meter per request and twelve a minute to each would use most of a free tier's allowance and could rate-limit
+ * real customers. readiness.models.every=1 (READINESS_MODELS_EVERY=1) turns it up if the plans allow it.
+ *
+ * That does two jobs. It holds the connections open, so the first question after a quiet hour is as fast as
  * the hundredth. And it measures, so the admin page can show each part as awake, slow or down, with how long it took, instead of
  * finding out from a customer.
  *
@@ -50,6 +55,10 @@ public class ReadinessService {
     @Autowired private SttController stt;
 
     @Value("${firebase.enabled:false}") private boolean firebaseEnabled;
+    /** The two models are asked on every Nth round (6 x 5 s = 30 s). 1 means every round. */
+    @Value("${readiness.models.every:6}") private int modelsEvery;
+    /** The speech providers are asked on every Nth round (12 x 5 s = 60 s). */
+    @Value("${readiness.speech.every:12}") private int speechEvery;
     @Value("${readiness.website.url:https://replysis.com/}") private String websiteUrl;
 
     private final long startedAt = System.currentTimeMillis();
@@ -63,16 +72,19 @@ public class ReadinessService {
     });
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(6)).build();
 
-    @Scheduled(initialDelay = 4_000, fixedDelay = 30_000)
+    @Scheduled(initialDelay = 4_000, fixedDelayString = "${readiness.round.ms:5000}")
     public void keepWarm() {
         var jobs = new LinkedHashMap<String, CompletableFuture<Probe>>();
-        jobs.put("answer_model", run(() -> fromMillis(interview.warmAnswerModel())));
-        jobs.put("screen_model", run(() -> fromMillis(interview.warmScreenModel())));
+        int n = round++;
+        if (n % Math.max(1, modelsEvery) == 0) {
+            jobs.put("answer_model", run(() -> fromMillis(interview.warmAnswerModel())));
+            jobs.put("screen_model", run(() -> fromMillis(interview.warmScreenModel())));
+        }
         jobs.put("database", run(this::database));
         jobs.put("website", run(() -> reach(websiteUrl)));
         // Speech asks the providers for a real (free, throwaway) token, which is exactly what starting to listen does, so a revoked or
         // exhausted key shows up here before a customer finds it. Once a minute is plenty to keep those connections open.
-        if (round++ % 2 == 0) {
+        if (n % Math.max(1, speechEvery) == 0) {
             jobs.put("speech", run(() -> fromMillis(stt.warmDeepgram())));
             jobs.put("speech_backup", run(() -> fromMillis(stt.warmSpeechmatics())));
         }
@@ -86,7 +98,7 @@ public class ReadinessService {
             }
 
             Probe before = latest.put(name, result);
-            // Say it once when a part changes state, not every half minute.
+            // Say it once when a part changes state, not on every round.
             if (before == null || before.ok() != result.ok()) {
                 System.out.println("[READY] " + name + (result.ok() ? " is awake (" + result.ms() + "ms)" : " is DOWN: " + result.note()));
             }
