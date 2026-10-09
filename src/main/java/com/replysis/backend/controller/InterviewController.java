@@ -664,6 +664,10 @@ public class InterviewController {
         if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
+        // The Mac app sends a deliberately large test upload (marked "probe") to learn what the connection can carry. It is answered and
+        // dropped: not stored, not counted, and not shown as a problem, because it is not one.
+        if (isProbe(payload)) return ResponseEntity.noContent().build();
+
         // Same ceiling as a real screen request. This costs no credits and calls
         // no model, but it does hold memory, so it is not a free-for-all.
         // Its own allowance, well above the one for a real request.
@@ -765,6 +769,11 @@ public class InterviewController {
 
         stashedImages.remove(id);
         return held;
+    }
+
+    /** A connection test from the app, not a screenshot. */
+    static boolean isProbe(Map<String, Object> payload) {
+        return payload != null && payload.containsKey("probe");
     }
 
     /** One line for the admin Live feed. Never blocks or fails the request it is called from. */

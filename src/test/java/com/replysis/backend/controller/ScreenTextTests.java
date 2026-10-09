@@ -80,4 +80,13 @@ class ScreenTextTests {
         assertEquals("only", InterviewController.joinScreenTexts(java.util.Arrays.asList(null, "  ", "only")));
         assertEquals("", InterviewController.joinScreenTexts(List.of()));
     }
+
+    @Test
+    void aConnectionTestIsRecognisedAndAScreenshotIsNot() {
+        assertTrue(InterviewController.isProbe(java.util.Map.of("probe", true)));
+        assertTrue(InterviewController.isProbe(new java.util.HashMap<>(java.util.Map.of("probe", "x", "image", "AAAA"))));
+        assertFalse(InterviewController.isProbe(java.util.Map.of("image", "AAAA")));
+        assertFalse(InterviewController.isProbe(java.util.Map.of("text", "some words")));
+        assertFalse(InterviewController.isProbe(null));
+    }
 }
