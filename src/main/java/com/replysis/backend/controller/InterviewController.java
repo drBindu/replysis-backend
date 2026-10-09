@@ -171,14 +171,19 @@ public class InterviewController {
     // a cent a day) and spends no customer's answers. Called by ReadinessService; returns milliseconds, or a negative code:
     // -1 the request failed, -2 that provider is not configured here.
     public long warmAnswerModel() {
-        return warmOnce(CEREBRAS_ENDPOINT, cerebrasApiKey, ANSWER_MODEL_CEREBRAS);
+        return warmOnce("answer", CEREBRAS_ENDPOINT, cerebrasApiKey, ANSWER_MODEL_CEREBRAS);
+    }
+
+    /** The model a real answer falls back to when the main one errors, so "can an answer be produced" can be asked as a whole. */
+    public long warmAnswerBackup() {
+        return warmOnce("answer backup", GEMINI_ENDPOINT, geminiApiKey, ANSWER_MODEL_GEMINI);
     }
 
     public long warmScreenModel() {
-        return warmOnce(GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI);
+        return warmOnce("screen", GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI);
     }
 
-    private long warmOnce(String endpoint, String apiKey, String model) {
+    private long warmOnce(String label, String endpoint, String apiKey, String model) {
         if (apiKey == null || apiKey.isBlank()) return -2;
         long started = System.currentTimeMillis();
         try {
@@ -196,12 +201,19 @@ public class InterviewController {
                     }
                 }
             } else {
+                // Say why, because a bare "the request failed" cannot be acted on: a rate limit, an outage and a bad key look the same.
+                String said;
                 try (var body = reply.body()) {
-                    body.readAllBytes();
+                    said = new String(body.readNBytes(160), java.nio.charset.StandardCharsets.UTF_8).replaceAll("[\\r\\n\\t\\p{Cntrl}]+", " ").trim();
                 }
+                System.out.println("[WARM] " + label + " check failed after " + (System.currentTimeMillis() - started)
+                        + " ms: HTTP " + reply.statusCode() + (said.isEmpty() ? "" : " " + said));
             }
             return reply.statusCode() == 200 ? System.currentTimeMillis() - started : -1;
         } catch (Exception e) {
+            String why = String.valueOf(e.getMessage());
+            System.out.println("[WARM] " + label + " check failed after " + (System.currentTimeMillis() - started)
+                    + " ms: " + e.getClass().getSimpleName() + " " + (why.length() > 120 ? why.substring(0, 120) : why));
             return -1;
         }
     }

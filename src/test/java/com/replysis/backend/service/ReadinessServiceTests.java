@@ -36,4 +36,27 @@ class ReadinessServiceTests {
         assertEquals("awake", ReadinessService.stateOf(new ReadinessService.Probe(true, 120, "", 0), 0));
         assertEquals("slow", ReadinessService.stateOf(new ReadinessService.Probe(true, 3000, "", 0), 0));
     }
+
+    @Test
+    void aMissOnTheMainAnswerModelIsCoveredWhenTheBackupAnswers() {
+        var main = new ReadinessService.Probe(false, 9000, "no answer in 9 s", 0);
+        var covered = ReadinessService.coverByBackup(main, 800, 1);
+        assertTrue(covered.ok(), "an answer could still be produced");
+        assertEquals("slow", ReadinessService.stateOf(covered, 0), "shown as covered and slow, not red");
+        assertTrue(covered.note().contains("backup"));
+    }
+
+    @Test
+    void whenTheBackupFailsToTheAnswerPathIsDown() {
+        var main = new ReadinessService.Probe(false, 9000, "no answer in 9 s", 0);
+        assertSame(main, ReadinessService.coverByBackup(main, -1, 1));
+        assertSame(main, ReadinessService.coverByBackup(main, -2, 1), "a backup that is not set up covers nothing");
+        assertEquals("down", ReadinessService.stateOf(ReadinessService.coverByBackup(main, -1, 1), 2));
+    }
+
+    @Test
+    void aHealthyMainModelNeedsNoBackup() {
+        var main = new ReadinessService.Probe(true, 120, "", 0);
+        assertSame(main, ReadinessService.coverByBackup(main, 5000, 1));
+    }
 }

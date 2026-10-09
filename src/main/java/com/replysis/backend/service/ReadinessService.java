@@ -101,7 +101,7 @@ public class ReadinessService {
         var jobs = new LinkedHashMap<String, CompletableFuture<Probe>>();
         int n = round++;
         if (n % Math.max(1, modelsEvery) == 0) {
-            jobs.put("answer_model", run(() -> fromMillis(interview.warmAnswerModel())));
+            jobs.put("answer_model", run(this::answerPath));
             jobs.put("screen_model", run(() -> fromMillis(interview.warmScreenModel())));
         }
         jobs.put("database", run(this::database));
@@ -116,7 +116,8 @@ public class ReadinessService {
         jobs.forEach((name, job) -> {
             Probe result;
             try {
-                result = job.get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                // The answer check may ask the main model and then the backup, one after the other, so it is given room for both.
+                result = job.get("answer_model".equals(name) ? 2 * PROBE_TIMEOUT_MS : PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             } catch (Exception e) {
                 result = new Probe(false, PROBE_TIMEOUT_MS, "no answer in " + PROBE_TIMEOUT_MS / 1000 + " s", System.currentTimeMillis());
             }
@@ -179,6 +180,23 @@ public class ReadinessService {
             alerts.recovered("part-" + name, "Replysis: " + label + " is back",
                     label + " is answering again (" + result.ms() + " ms).");
         }
+    }
+
+    /**
+     * Whether an answer can be produced at all. A real answer that gets an error from the main model falls back to a second one, so
+     * a miss on the main model alone is not an outage: it is asked again of the backup, and only when both fail is the answer path
+     * down. Without this a thirty second wobble at one provider turned the panel red, and would have sent an email.
+     */
+    private Probe answerPath() {
+        Probe main = fromMillis(interview.warmAnswerModel());
+        if (main.ok()) return main;
+        return coverByBackup(main, interview.warmAnswerBackup(), System.currentTimeMillis());
+    }
+
+    /** The main model missed. If the backup answered, say so and show it as slow (covered, but not as good as it should be). */
+    static Probe coverByBackup(Probe main, long backupMs, long now) {
+        if (main.ok() || backupMs < 0) return main;
+        return new Probe(true, Math.max(SLOW_MS, backupMs), "main model missed, the backup is covering", now);
     }
 
     /**
