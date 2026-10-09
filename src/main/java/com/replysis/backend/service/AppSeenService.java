@@ -41,6 +41,7 @@ public class AppSeenService {
 
     private final ConcurrentHashMap<String, Seen> seen = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> presenceAt = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> presenceListening = new ConcurrentHashMap<>();
 
     private final ThreadPoolExecutor writer = new ThreadPoolExecutor(
             2, 2, 60L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(256),
@@ -84,26 +85,45 @@ public class AppSeenService {
      * or lastWebAt. A surface that was closed simply stops pinging and ages out. At most one write per person per surface every
      * twenty-five seconds, update-only, never blocking the request.
      */
-    public void presence(String uid, AppInfo info) {
+    public void presence(String uid, AppInfo info, boolean listening) {
         if (uid == null || uid.isBlank() || !firebaseEnabled) return;
 
         String key = uid + "/" + (info == null ? "web" : info.platform());
         long now = System.currentTimeMillis();
         Long before = presenceAt.get(key);
-        if (before != null && now - before < PRESENCE_REWRITE_MS) return;
+        // Starting or stopping listening is written at once, however recently the last ping went in: that is the moment worth seeing.
+        boolean changed = info != null && !Boolean.valueOf(listening).equals(presenceListening.get(key));
+        if (before != null && !changed && now - before < PRESENCE_REWRITE_MS) return;
 
-        if (presenceAt.size() >= REMEMBER_AT_MOST) presenceAt.clear();
+        if (presenceAt.size() >= REMEMBER_AT_MOST) { presenceAt.clear(); presenceListening.clear(); }
         presenceAt.put(key, now);
+        if (info != null) presenceListening.put(key, listening);
 
         try {
-            writer.execute(() -> writePresence(uid, info));
+            writer.execute(() -> writePresence(uid, presenceFields(info, listening)));
         } catch (Exception ignored) {
             // The queue is closed or full; the next ping tries again.
         }
     }
 
+    /**
+     * This surface was closed on purpose (the app quit, the tab was closed). Written at once so the admin page drops it the moment
+     * it happens instead of after the ping timeout. A crash or a closed laptop sends nothing and ages out as before.
+     */
+    public void leave(String uid, AppInfo info) {
+        if (uid == null || uid.isBlank() || !firebaseEnabled) return;
+        String key = uid + "/" + (info == null ? "web" : info.platform());
+        presenceAt.remove(key);
+        presenceListening.remove(key);
+        try {
+            writer.execute(() -> writePresence(uid, leaveFields(info)));
+        } catch (Exception ignored) {
+            // Not worth failing a closing app over; the ping timeout still ends it.
+        }
+    }
+
     /** The fields one presence ping writes. Separate so a test can see exactly what lands on the document. */
-    static Map<String, Object> presenceFields(AppInfo info) {
+    static Map<String, Object> presenceFields(AppInfo info, boolean listening) {
         Map<String, Object> fields = new HashMap<>();
         if (info == null) {
             fields.put("lastWebAt", FieldValue.serverTimestamp());
@@ -112,14 +132,27 @@ public class AppSeenService {
             fields.put("lastAppVersion", info.version());
             fields.put("lastAppSeenAt", FieldValue.serverTimestamp());
             fields.put("lastAppAt", FieldValue.serverTimestamp());
+            fields.put("appListening", listening);
         }
         return fields;
     }
 
-    private void writePresence(String uid, AppInfo info) {
+    /** What a clean close writes. The admin page treats a surface as gone when its left time is not older than its last ping. */
+    static Map<String, Object> leaveFields(AppInfo info) {
+        Map<String, Object> fields = new HashMap<>();
+        if (info == null) {
+            fields.put("lastWebLeftAt", FieldValue.serverTimestamp());
+        } else {
+            fields.put("lastAppLeftAt", FieldValue.serverTimestamp());
+            fields.put("appListening", false);
+        }
+        return fields;
+    }
+
+    private void writePresence(String uid, Map<String, Object> fields) {
         try {
             FirestoreClient.getFirestore().collection("users").document(uid)
-                    .update(presenceFields(info)).get(8, TimeUnit.SECONDS);
+                    .update(fields).get(8, TimeUnit.SECONDS);
         } catch (Exception ignored) {
             // No document yet, or the database was slow. The next ping tries again.
         }

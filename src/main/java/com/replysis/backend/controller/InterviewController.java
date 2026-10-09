@@ -1,5 +1,6 @@
 package com.replysis.backend.controller;
 
+import com.replysis.backend.security.AppInfo;
 import com.replysis.backend.security.IdentityResolverService;
 import com.replysis.backend.security.RequestIdentity;
 import com.replysis.backend.security.SimpleRateLimiter;
@@ -30,6 +31,10 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/interview")
 public class InterviewController {
+
+    // A line in the admin Live feed for work no billed answer records. Absent in tests.
+    @Autowired(required = false)
+    private com.replysis.backend.service.ActivityService activity;
 
     @Autowired
     private IdentityResolverService identityResolver;
@@ -686,10 +691,14 @@ public class InterviewController {
 
         boolean haveImage = image != null && !image.isBlank();
         boolean haveWords = screenWords != null && screenWords.length() >= MIN_SCREEN_TEXT_CHARS;
-        if (haveImage && !isBase64(image))
+        if (haveImage && !isBase64(image)) {
+            noteActivity("rejected", identity, "screen upload turned away: the picture was not valid", 0, AppInfo.current());
             return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
-        if (!haveImage && !haveWords)
+        }
+        if (!haveImage && !haveWords) {
+            noteActivity("rejected", identity, "screen upload turned away: no usable picture or words in it", 0, AppInfo.current());
             return ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
+        }
         if (!haveImage) image = null;
         if (!haveWords) screenWords = null;
 
@@ -756,6 +765,12 @@ public class InterviewController {
 
         stashedImages.remove(id);
         return held;
+    }
+
+    /** One line for the admin Live feed. Never blocks or fails the request it is called from. */
+    private void noteActivity(String kind, RequestIdentity identity, String detail, long ms, AppInfo app) {
+        if (activity == null || identity == null) return;
+        activity.record(kind, identity.isGuest() ? identity.deviceId() : identity.uid(), identity.isGuest(), detail, ms, app);
     }
 
     /** Same shape the rate limiter already uses, so one caller means one caller. */
@@ -2040,6 +2055,7 @@ public class InterviewController {
             future.complete(null);
             return future;
         }
+        final AppInfo app = AppInfo.current(); // read here: the worker thread below has no request to read it from
         try {
             preReadPool.execute(() -> {
                 long t0 = System.currentTimeMillis();
@@ -2047,10 +2063,18 @@ public class InterviewController {
                     String read = image != null
                             ? readScreen(GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI, List.of(image), GENERIC_ASKED)
                             : readScreenText(words, GENERIC_ASKED);
+                    long took = System.currentTimeMillis() - t0;
                     System.out.println("[SCREEN_PREREAD] " + (image != null ? "picture" : "text") + " read in "
-                            + (System.currentTimeMillis() - t0) + "ms, chars=" + (read == null ? 0 : read.length()));
+                            + took + "ms, chars=" + (read == null ? 0 : read.length()));
+                    noteActivity(read == null || read.isBlank() ? "preread_failed" : "preread", identity,
+                            read == null || read.isBlank()
+                                    ? "screen read ahead came back empty (" + (image != null ? "picture" : "words") + ", " + took + " ms)"
+                                    : "screen read ahead from the " + (image != null ? "picture" : "words") + " in " + took + " ms, not answered yet",
+                            took, app);
                     future.complete(read);
                 } catch (Throwable e) {
+                    noteActivity("preread_failed", identity, "screen read ahead failed (" + e.getClass().getSimpleName() + ")",
+                            System.currentTimeMillis() - t0, app);
                     future.complete(null);
                 }
             });
