@@ -89,4 +89,21 @@ class ScreenTextTests {
         assertFalse(InterviewController.isProbe(java.util.Map.of("text", "some words")));
         assertFalse(InterviewController.isProbe(null));
     }
+
+    @Test
+    void onlyMacOneZeroTwoFiftyAndNewerGetsA204ForItsConnectionTest() {
+        var accept = new java.util.function.Predicate<com.replysis.backend.security.AppInfo>() {
+            public boolean test(com.replysis.backend.security.AppInfo a) { return InterviewController.acceptsProbe204(a); }
+        };
+        assertTrue(accept.test(new com.replysis.backend.security.AppInfo("mac", "1.0.250")));
+        assertTrue(accept.test(new com.replysis.backend.security.AppInfo("mac", "1.0.251")));
+        assertTrue(accept.test(new com.replysis.backend.security.AppInfo("mac", "1.1.0")));
+        assertTrue(accept.test(new com.replysis.backend.security.AppInfo("mac", "2.0.1")));
+        assertFalse(accept.test(new com.replysis.backend.security.AppInfo("mac", "1.0.249")), "older Macs count anything but 400 as a bad line");
+        assertFalse(accept.test(new com.replysis.backend.security.AppInfo("mac", "1.0.9")));
+        assertFalse(accept.test(new com.replysis.backend.security.AppInfo("mac", "")), "Macs from before the version label");
+        assertFalse(accept.test(new com.replysis.backend.security.AppInfo("windows", "1.0.31")), "Windows only accepts 400 or 200");
+        assertFalse(accept.test(new com.replysis.backend.security.AppInfo("windows", "9.9.999")));
+        assertFalse(accept.test(null), "no label means an older app");
+    }
 }

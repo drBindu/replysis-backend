@@ -664,10 +664,6 @@ public class InterviewController {
         if (identity == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
 
-        // The Mac app sends a deliberately large test upload (marked "probe") to learn what the connection can carry. It is answered and
-        // dropped: not stored, not counted, and not shown as a problem, because it is not one.
-        if (isProbe(payload)) return ResponseEntity.noContent().build();
-
         // Same ceiling as a real screen request. This costs no credits and calls
         // no model, but it does hold memory, so it is not a free-for-all.
         // Its own allowance, well above the one for a real request.
@@ -688,6 +684,16 @@ public class InterviewController {
                 || !rateLimiter.tryAcquire("screen-cache:identity:" + identityKey(identity),
                                     SCREEN_CACHE_PER_MINUTE, 60_000L))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+
+        // Both desktop apps send a deliberately large test upload (marked "probe") to learn what the connection can carry, and judge it by
+        // the status they get back. Every app released so far expects exactly 400 (no picture in the body) and counts anything else as a bad
+        // line, which makes it stop sending screenshots ahead of questions. Mac 1.0.250 and newer also accept 204, so only they get it.
+        // A test is never stored, never counted and never shown as a problem, because it is not one.
+        if (isProbe(payload)) {
+            return acceptsProbe204(AppInfo.current())
+                    ? ResponseEntity.noContent().build()
+                    : ResponseEntity.badRequest().body(Map.of("error", "image missing or not valid base64"));
+        }
 
         String image = text(payload.get("image"), MAX_IMAGE_BASE64_CHARS);
         // What the app read off the screen, for a connection too slow to carry the picture. A few kilobytes.
@@ -774,6 +780,24 @@ public class InterviewController {
     /** A connection test from the app, not a screenshot. */
     static boolean isProbe(Map<String, Object> payload) {
         return payload != null && payload.containsKey("probe");
+    }
+
+    /** Whether this app accepts 204 as the answer to its connection test: Mac 1.0.250 and newer. Everything else expects 400. */
+    static boolean acceptsProbe204(AppInfo app) {
+        if (app == null || !"mac".equals(app.platform()) || app.version() == null) return false;
+        String[] parts = app.version().split("\\.");
+        if (parts.length < 3) return false;
+        int[] have = new int[3];
+        for (int i = 0; i < 3; i++) {
+            java.util.regex.Matcher digits = java.util.regex.Pattern.compile("^\\d+").matcher(parts[i]);
+            if (!digits.find()) return false;
+            try { have[i] = Integer.parseInt(digits.group()); } catch (NumberFormatException e) { return false; }
+        }
+        int[] want = {1, 0, 250};
+        for (int i = 0; i < 3; i++) {
+            if (have[i] != want[i]) return have[i] > want[i];
+        }
+        return true;
     }
 
     /** One line for the admin Live feed. Never blocks or fails the request it is called from. */
