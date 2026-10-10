@@ -165,6 +165,10 @@ public class InterviewController {
     private static final int    PER_IP_PER_MINUTE = 30;
 
     private final ObjectMapper mapper = new ObjectMapper();
+    // How long the main answer model gets alone before the backup is asked too. 0 turns it off.
+    @org.springframework.beans.factory.annotation.Value("${answer.hedge.ms:900}")
+    private long answerHedgeMs;
+
     private final HttpClient   httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
@@ -446,7 +450,26 @@ public class InterviewController {
                 var messages = aiMessages;   // effectively final — captured from above
 
                 long providerStart = System.currentTimeMillis();
-                HttpResponse<java.io.InputStream> response = callAiProvider(endpoint, apiKey, model, messages);
+                // Usually one call. If the main model has said nothing after answerHedgeMs, the backup is asked too and
+                // whichever answers well first is used (HedgedCall). A quick reply, good or not, is returned exactly as
+                // before, so the retry and fallback handling below is unchanged. Only a silent main call is raced.
+                final var hedgeFlag = new java.util.concurrent.atomic.AtomicBoolean(false);
+                final boolean hedgeable = answerHedgeMs > 0 && fallbackApiKey != null && !fallbackApiKey.isBlank();
+                HttpResponse<java.io.InputStream> response = com.replysis.backend.service.HedgedCall.race(
+                        () -> callAiProvider(endpoint, apiKey, model, messages),
+                        hedgeable ? () -> {
+                            hedgeFlag.set(true);
+                            System.out.println("[HEDGE] " + model + " silent for " + answerHedgeMs + " ms; also asking " + fallbackModel);
+                            return callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                        } : null,
+                        answerHedgeMs,
+                        r -> r.statusCode() == 200,
+                        r -> { try { r.body().close(); } catch (Exception ignored) { /* already closed */ } },
+                        com.replysis.backend.service.HedgedCall.pool());
+                if (hedgeFlag.get()) {
+                    System.out.println("[HEDGE] reply after " + (System.currentTimeMillis() - providerStart)
+                            + " ms, HTTP " + response.statusCode());
+                }
 
                 // The charge ran alongside the call above. Nothing has been
                 // written yet, so refusing here is still a refusal to serve.
