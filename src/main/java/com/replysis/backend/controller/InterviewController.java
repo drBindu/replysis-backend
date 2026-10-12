@@ -973,6 +973,8 @@ public class InterviewController {
                         com.replysis.backend.service.UsageEventService.ACTION_SCREEN,
                         "gemini", VISION_MODEL_GEMINI);
         final long[] screenTokens = new long[2];
+        // Set when the model says there was nothing on the screen to answer, so that read is not charged.
+        final boolean[] nothingAsked = new boolean[1];
 
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
         // and a refund below if every vision provider fails.
@@ -1126,7 +1128,7 @@ public class InterviewController {
                     HttpResponse<java.io.InputStream> said = callTextScreenAnswer(screenWords, finalPrompt);
                     if (said.statusCode() == 200) {
                         providerAccepted = true;
-                        answerDelivered = streamUnlessRefused(said, outputStream, screenTokens);
+                        answerDelivered = streamUnlessRefused(said, outputStream, screenTokens, nothingAsked);
                     } else {
                         System.err.println("Text screen answer failed: HTTP " + said.statusCode());
                         outputStream.write(said.statusCode() == 429
@@ -1203,7 +1205,7 @@ public class InterviewController {
                 // Doing this here rather than in the app means it costs one
                 // credit instead of two, and it covers the builds already
                 // installed, which cannot retry and were showing the apology.
-                answerDelivered = streamUnlessRefused(response, outputStream, screenTokens);
+                answerDelivered = streamUnlessRefused(response, outputStream, screenTokens, nothingAsked);
 
                 if (!answerDelivered) {
                     System.out.println("[VISION] Model declined; asking again in plainer words.");
@@ -1211,7 +1213,7 @@ public class InterviewController {
                     HttpResponse<java.io.InputStream> retry =
                             callVisionProvider(endpoint, apiKey, model, plain);
                     if (retry.statusCode() == 200)
-                        answerDelivered = streamUnlessRefused(retry, outputStream, screenTokens);
+                        answerDelivered = streamUnlessRefused(retry, outputStream, screenTokens, nothingAsked);
                 }
             } catch (Exception e) {
                 System.err.println("Screen analysis stream error: " + e.getMessage());
@@ -1226,8 +1228,9 @@ public class InterviewController {
                 usageEvents.attachTokens(screenUsage.eventId(), screenTokens[0], screenTokens[1],
                         System.currentTimeMillis() - chargeStart);
 
-                // No answer was delivered — return the up-front charge.
-                if (!providerAccepted || !answerDelivered) {
+                // No answer was delivered, or the screen held nothing to answer: return the up-front charge.
+                if (nothingAsked[0]) System.out.println("[SCREEN] Nothing on the screen to answer; not charged.");
+                if (!providerAccepted || !answerDelivered || nothingAsked[0]) {
                     if (identity.isGuest()) creditsService.refundGuestCredits(
                             identity.deviceId(), ANSWER_COST, screenUsage);
                     else                    creditsService.refundCredits(
@@ -1531,6 +1534,25 @@ public class InterviewController {
     private boolean streamUnlessRefused(HttpResponse<java.io.InputStream> response,
                                         java.io.OutputStream outputStream,
                                         long[] tokensOut) throws Exception {
+        return streamUnlessRefused(response, outputStream, tokensOut, null);
+    }
+
+    /**
+     * Whether an answer opens with the marker the screen prompt asks for when there is nothing on the screen to answer
+     * (the empty desktop, a window with no question). Such a read is shown to the person but not charged.
+     */
+    static boolean opensWithNothingAsked(String opening) {
+        return opening != null
+                && opening.stripLeading().toUpperCase(java.util.Locale.ROOT).startsWith("NOTHING ASKED");
+    }
+
+    /**
+     * @param nothingAskedOut optional one-slot array set to true when the answer opens with NOTHING ASKED.
+     */
+    private boolean streamUnlessRefused(HttpResponse<java.io.InputStream> response,
+                                        java.io.OutputStream outputStream,
+                                        long[] tokensOut,
+                                        boolean[] nothingAskedOut) throws Exception {
         StringBuilder opening = new StringBuilder();
         List<String> held = new java.util.ArrayList<>();
         boolean released = false, delivered = false;
@@ -1575,6 +1597,8 @@ public class InterviewController {
                 if (opening.length() < REFUSAL_PROBE_CHARS) continue;
 
                 if (looksLikeRefusal(opening.toString())) return false;
+                if (nothingAskedOut != null && nothingAskedOut.length > 0 && opensWithNothingAsked(opening.toString()))
+                    nothingAskedOut[0] = true;
 
                 released = true;
                 for (String h : held) outputStream.write((h + "\n\n").getBytes());
@@ -1596,6 +1620,8 @@ public class InterviewController {
         // Ended before the probe filled, so nothing has been written yet.
         if (!released) {
             if (looksLikeRefusal(opening.toString())) return false;
+            if (nothingAskedOut != null && nothingAskedOut.length > 0 && opensWithNothingAsked(opening.toString()))
+                nothingAskedOut[0] = true;
             for (String h : held) outputStream.write((h + "\n\n").getBytes());
             outputStream.flush();
         }
