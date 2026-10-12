@@ -69,8 +69,7 @@ public class QuestionController {
         String resume = text(body, "resume", MAX_RESUME_CHARS);
         String jd = text(body, "jd", MAX_JD_CHARS);
         String difficulty = text(body, "difficulty", 40);
-        if (resume.trim().length() < 20)
-            return fail(HttpStatus.BAD_REQUEST, "resume_missing", "Add your resume text first.", false);
+        // A resume is optional: without one the questions are written for the role in the job description, or a general role.
         int count = clampCount(body == null ? null : body.get("count"));
 
         return charged(user, "question_generation", QUESTION_SET_CREDITS, () -> {

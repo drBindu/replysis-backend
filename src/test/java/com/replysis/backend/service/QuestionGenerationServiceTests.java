@@ -197,6 +197,21 @@ class QuestionGenerationServiceTests {
     }
 
     @Test
+    void withNoResumeTheModelIsToldNotToInventOne() throws Exception {
+        cerebrasContent = GOOD_FEEDBACK;
+        service("ck", "").feedback("", "Backend engineer", "Why this role?", "Because I like building reliable systems.");
+        assertTrue(cerebrasBody.get().contains("None provided."));
+        assertTrue(cerebrasBody.get().contains("do NOT invent employers"));
+    }
+
+    @Test
+    void questionsWithNoResumeAreAskedForTheRole() throws Exception {
+        service("ck", "").generate("", "Backend engineer at a bank", 50, "");
+        assertTrue(cerebrasBody.get().contains("None provided."));
+        assertTrue(cerebrasBody.get().contains("Backend engineer at a bank"));
+    }
+
+    @Test
     void aScriptIsTheBetterAnswerAndItsProof() throws Exception {
         cerebrasContent = "{\"betterAnswerExample\":\"Yeah so, I led the payments migration.\",\"resume_proof\":\"payments migration\"}";
         java.util.Map<String, Object> s = service("ck", "").script(RESUME, "", "Tell me about yourself.", "um");

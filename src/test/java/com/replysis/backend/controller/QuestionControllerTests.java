@@ -114,11 +114,17 @@ class QuestionControllerTests {
     }
 
     @Test
-    void aMissingResumeIsRefusedBeforeAnyCharge() {
+    void noResumeIsFineAndStillGetsQuestionsForTheRole() throws Exception {
+        when(generator.generate(eq(""), eq("Backend engineer"), anyInt(), any())).thenReturn(fifty());
         ResponseEntity<Map<String, Object>> r = call("Bearer good", Map.of("jd", "Backend engineer"));
-        assertEquals(HttpStatus.BAD_REQUEST, r.getStatusCode());
-        assertEquals("resume_missing", r.getBody().get("error"));
-        verify(credits, never()).deductCredits(anyString(), anyInt(), any());
+        assertEquals(HttpStatus.OK, r.getStatusCode());
+        verify(credits, times(1)).deductCredits(eq("user-1"), eq(5), any());
+    }
+
+    @Test
+    void aVeryShortResumeIsNotRefusedEither() throws Exception {
+        when(generator.generate(any(), any(), anyInt(), any())).thenReturn(fifty());
+        assertEquals(HttpStatus.OK, call("Bearer good", Map.of("resume", "Fresher")).getStatusCode());
     }
 
     @Test

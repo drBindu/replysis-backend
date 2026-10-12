@@ -112,7 +112,7 @@ public class QuestionGenerationService {
                 + "- improvements: exact wording tips\n"
                 + "- betterAnswerExample: SHORT (3-5 sentences), REAL resume facts\n"
                 + "- resume_proof: resume details used";
-        return run(system, answerPrompt(resume, jd, question, answer), FEEDBACK_MAX_TOKENS, this::parseFeedback);
+        return run(system + noResumeRule(resume), answerPrompt(resume, jd, question, answer), FEEDBACK_MAX_TOKENS, this::parseFeedback);
     }
 
     /** A short, natural answer in the person's own voice, for when theirs was too short to coach. */
@@ -123,15 +123,24 @@ public class QuestionGenerationService {
                 + "- Use REAL facts from the resume\n"
                 + "- Start: \"Yeah so...\", \"So for that...\"\n"
                 + "- resume_proof: specific resume detail used";
-        return run(system, answerPrompt(resume, jd, question, answer), SCRIPT_MAX_TOKENS, this::parseScript);
+        return run(system + noResumeRule(resume), answerPrompt(resume, jd, question, answer), SCRIPT_MAX_TOKENS, this::parseScript);
     }
 
     // ------------------------------------------------------------------ prompt and parsing
+
+    /** Without a resume there are no real facts to build a better answer from, so it must not pretend there are. */
+    static String noResumeRule(String resume) {
+        return resume == null || resume.isBlank()
+                ? "\n- No resume was provided: do NOT invent employers, projects, tools or numbers; write the better answer as a clear"
+                        + " structure the person can fill with their own details, and say so in resume_proof"
+                : "";
+    }
 
     static String buildUserPrompt(String resume, String jd, int count, String difficulty) {
         String level = difficulty == null || difficulty.isBlank() ? "" : "\nDifficulty: " + difficulty.trim().replaceAll("[\\r\\n]+", " ");
         String r = resume == null ? "" : resume.trim();
         String j = jd == null || jd.isBlank() ? "Software Engineer role" : jd.trim();
+        if (r.isEmpty()) r = "None provided. Ask well-rounded questions for the role below and assume nothing about the person's background.";
         return "Generate exactly " + count + " interview questions.\n\nRESUME:\n" + clip(r, 2500)
                 + "\n\nJOB DESCRIPTION:\n" + clip(j, 800) + level
                 + "\n\nRules:\n- Mix technical, behavioral, situational\n- No \"Tell me about yourself\"\n- No numbering inside strings\n- Return exactly "
@@ -140,7 +149,8 @@ public class QuestionGenerationService {
 
     static String answerPrompt(String resume, String jd, String question, String answer) {
         String j = jd == null || jd.isBlank() ? "N/A" : jd.trim();
-        return "RESUME:\n" + clip(resume == null ? "" : resume.trim(), 6000)
+        String r = resume == null ? "" : resume.trim();
+        return "RESUME:\n" + (r.isEmpty() ? "None provided." : clip(r, 6000))
                 + "\n\nJD:\n" + clip(j, 2000)
                 + "\n\nQ:\n" + clip(question == null ? "" : question.trim(), 1000)
                 + "\n\nANSWER:\n" + clip(answer == null ? "" : answer.trim(), 4000);
