@@ -154,6 +154,64 @@ class QuestionGenerationServiceTests {
         assertEquals(GenerationException.Kind.BAD_OUTPUT, e.kind());
     }
 
+    // ------------------------------------------------------------------ feedback and script
+
+    private static final String GOOD_FEEDBACK =
+            "{\"score\":8,\"strengths\":[\"Concrete example\",\"Good result\"],\"improvements\":[\"Lead with the outcome\"],"
+                    + "\"betterAnswerExample\":\"So for that, I traced a race in our retry queue and fixed it.\",\"resume_proof\":\"retry queue\"}";
+
+    @Test
+    void feedbackComesBackWithAScoreAndABetterAnswer() throws Exception {
+        cerebrasContent = GOOD_FEEDBACK;
+        java.util.Map<String, Object> f = service("ck", "gk").feedback(RESUME, "Backend", "Tell me about a bug.", "I fixed a race condition in our queue.");
+        assertEquals(8.0, ((Number) f.get("score")).doubleValue());
+        assertEquals(2, ((List<?>) f.get("strengths")).size());
+        assertTrue(((String) f.get("betterAnswerExample")).startsWith("So for that"));
+        assertEquals(0, geminiCalls.get());
+        assertTrue(cerebrasBody.get().contains("practical interview coach"));
+        assertTrue(cerebrasBody.get().contains("I fixed a race condition in our queue."));
+    }
+
+    @Test
+    void aScoreOutsideZeroToTenIsClamped() throws Exception {
+        cerebrasContent = "{\"score\":42,\"strengths\":[\"x\"],\"improvements\":[],\"betterAnswerExample\":\"y\"}";
+        assertEquals(10.0, ((Number) service("ck", "").feedback(RESUME, "", "q", "a answer here").get("score")).doubleValue());
+    }
+
+    @Test
+    void feedbackWithNoScoreOrNothingToSayFallsToTheBackup() throws Exception {
+        cerebrasContent = "{\"strengths\":[],\"improvements\":[],\"betterAnswerExample\":\"\"}";
+        geminiContent = GOOD_FEEDBACK;
+        java.util.Map<String, Object> f = service("ck", "gk").feedback(RESUME, "", "q", "an answer long enough");
+        assertEquals(8.0, ((Number) f.get("score")).doubleValue());
+        assertEquals(1, geminiCalls.get());
+    }
+
+    @Test
+    void feedbackThatNeverComesIsBadOutputOrUnavailable() {
+        cerebrasContent = "{}";
+        geminiStatus = 500;
+        GenerationException e = assertThrows(GenerationException.class,
+                () -> service("ck", "gk").feedback(RESUME, "", "q", "an answer long enough"));
+        assertEquals(GenerationException.Kind.BAD_OUTPUT, e.kind());
+    }
+
+    @Test
+    void aScriptIsTheBetterAnswerAndItsProof() throws Exception {
+        cerebrasContent = "{\"betterAnswerExample\":\"Yeah so, I led the payments migration.\",\"resume_proof\":\"payments migration\"}";
+        java.util.Map<String, Object> s = service("ck", "").script(RESUME, "", "Tell me about yourself.", "um");
+        assertEquals("Yeah so, I led the payments migration.", s.get("betterAnswerExample"));
+        assertEquals("payments migration", s.get("resume_proof"));
+    }
+
+    @Test
+    void aScriptWithNoAnswerTextIsBadOutput() {
+        cerebrasContent = "{\"betterAnswerExample\":\"  \"}";
+        geminiContent = "{}";
+        GenerationException e = assertThrows(GenerationException.class, () -> service("ck", "gk").script(RESUME, "", "q", "a"));
+        assertEquals(GenerationException.Kind.BAD_OUTPUT, e.kind());
+    }
+
     // ------------------------------------------------------------------ parsing
 
     @Test

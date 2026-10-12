@@ -24,29 +24,37 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Interview question sets for the website's mock interview, with the provider keys and the credit rules kept here.
+ * The website's mock interview, with the provider keys and the credit rules kept here: the question set, the coaching on an
+ * answer, and a short better-answer script.
  *
- * One endpoint, for a signed-in person only (a Firebase token: the same account and the same credit balance the Windows app
- * uses). It checks that a model is configured BEFORE charging, charges once, and gives the charge back if the questions
- * cannot be produced. Every failure says what actually went wrong and whether the person was charged.
+ * For a signed-in person only (a Firebase token: the same account and the same credit balance the Windows app uses). Each
+ * call checks that a model is configured BEFORE charging, charges once, and gives the charge back if the result cannot be
+ * produced. Every failure says what actually went wrong and whether the person was charged.
  */
 @RestController
 @RequestMapping("/api/v1/questions")
 public class QuestionController {
 
-    /** The website's price list: CREDIT_ACTION_COSTS.question_generation. */
+    /** The website's price list: CREDIT_ACTION_COSTS.question_generation, .mock_feedback, .mock_script. */
     static final int QUESTION_SET_CREDITS = 5;
+    static final int FEEDBACK_CREDITS = 5;
+    static final int SCRIPT_CREDITS = 5;
     static final int DEFAULT_COUNT = 50;
     private static final int MIN_COUNT = 10;
     private static final int MAX_RESUME_CHARS = 20_000;
     private static final int MAX_JD_CHARS = 8_000;
-    private static final int PER_PERSON_PER_MINUTE = 6;
-    private static final int PER_ADDRESS_PER_MINUTE = 30;
+    private static final int MAX_QUESTION_CHARS = 2_000;
+    private static final int MAX_ANSWER_CHARS = 8_000;
+    private static final int PER_ADDRESS_PER_MINUTE = 40;
 
     @Autowired private FirebaseAuthService firebaseAuthService;
     @Autowired private FirestoreCreditsService creditsService;
     @Autowired private QuestionGenerationService generator;
     @Autowired private SimpleRateLimiter rateLimiter;
+
+    /** The work itself, run only after the person has been charged. */
+    @FunctionalInterface
+    private interface Work { Map<String, Object> run() throws GenerationException; }
 
     @PostMapping("/generate")
     public ResponseEntity<Map<String, Object>> generate(
@@ -55,12 +63,8 @@ public class QuestionController {
             HttpServletRequest request) {
 
         AuthUser user = verifyToken(authHeader);
-        if (user == null)
-            return fail(HttpStatus.UNAUTHORIZED, "not_signed_in", "Please sign in again.", false);
-
-        if (!rateLimiter.tryAcquire("questions:ip:" + rateLimiter.clientIp(request), PER_ADDRESS_PER_MINUTE, 60_000L)
-                || !rateLimiter.tryAcquire("questions:user:" + user.uid(), PER_PERSON_PER_MINUTE, 60_000L))
-            return fail(HttpStatus.TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Please wait a minute and try again.", false);
+        if (user == null) return notSignedIn();
+        if (!allow(user, request, "generate", 6)) return rateLimited();
 
         String resume = text(body, "resume", MAX_RESUME_CHARS);
         String jd = text(body, "jd", MAX_JD_CHARS);
@@ -69,45 +73,100 @@ public class QuestionController {
             return fail(HttpStatus.BAD_REQUEST, "resume_missing", "Add your resume text first.", false);
         int count = clampCount(body == null ? null : body.get("count"));
 
-        // Nothing is charged for a service that cannot do the job.
-        if (!generator.configured())
-            return fail(HttpStatus.SERVICE_UNAVAILABLE, "question_service_not_configured",
-                    "Question generation is not set up on this server yet. You were not charged.", false);
-
-        UsageEventService.Context usage = UsageEventService.Context.of("question_generation");
-        boolean charged = creditsService.deductCredits(user.uid(), QUESTION_SET_CREDITS, usage);
-        if (!charged)
-            return fail(HttpStatus.PAYMENT_REQUIRED, "insufficient_credits",
-                    "You do not have enough answers left to prepare questions.", false);
-
-        try {
+        return charged(user, "question_generation", QUESTION_SET_CREDITS, () -> {
             List<String> questions = generator.generate(resume, jd, count, difficulty);
             Map<String, Object> ok = new LinkedHashMap<>();
             ok.put("questions", questions);
             ok.put("count", questions.size());
-            return ResponseEntity.ok(ok);
+            return ok;
+        });
+    }
+
+    @PostMapping("/feedback")
+    public ResponseEntity<Map<String, Object>> feedback(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody(required = false) Map<String, Object> body,
+            HttpServletRequest request) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null) return notSignedIn();
+        if (!allow(user, request, "feedback", 15)) return rateLimited();
+
+        String resume = text(body, "resume", MAX_RESUME_CHARS);
+        String jd = text(body, "jd", MAX_JD_CHARS);
+        String question = text(body, "question", MAX_QUESTION_CHARS);
+        String answer = text(body, "answer", MAX_ANSWER_CHARS);
+        if (question.isBlank() || answer.isBlank())
+            return fail(HttpStatus.BAD_REQUEST, "answer_missing", "There is no answer to review yet.", false);
+
+        return charged(user, "mock_feedback", FEEDBACK_CREDITS, () -> generator.feedback(resume, jd, question, answer));
+    }
+
+    @PostMapping("/script")
+    public ResponseEntity<Map<String, Object>> script(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody(required = false) Map<String, Object> body,
+            HttpServletRequest request) {
+
+        AuthUser user = verifyToken(authHeader);
+        if (user == null) return notSignedIn();
+        if (!allow(user, request, "script", 15)) return rateLimited();
+
+        String resume = text(body, "resume", MAX_RESUME_CHARS);
+        String jd = text(body, "jd", MAX_JD_CHARS);
+        String question = text(body, "question", MAX_QUESTION_CHARS);
+        String answer = text(body, "answer", MAX_ANSWER_CHARS);
+        if (question.isBlank())
+            return fail(HttpStatus.BAD_REQUEST, "question_missing", "There is no question to answer yet.", false);
+
+        return charged(user, "mock_script", SCRIPT_CREDITS, () -> generator.script(resume, jd, question, answer));
+    }
+
+    // ------------------------------------------------------------------ shared steps
+
+    /**
+     * Checks a model is configured, charges once, runs the work, and gives the charge back on any failure. The check comes
+     * first so nobody is charged for a service that cannot do the job.
+     */
+    private ResponseEntity<Map<String, Object>> charged(AuthUser user, String action, int credits, Work work) {
+        if (!generator.configured())
+            return fail(HttpStatus.SERVICE_UNAVAILABLE, "question_service_not_configured",
+                    "This is not set up on this server yet. You were not charged.", false);
+
+        UsageEventService.Context usage = UsageEventService.Context.of(action);
+        if (!creditsService.deductCredits(user.uid(), credits, usage))
+            return fail(HttpStatus.PAYMENT_REQUIRED, "insufficient_credits",
+                    "You do not have enough answers left for this.", false);
+
+        try {
+            return ResponseEntity.ok(work.run());
         } catch (GenerationException e) {
-            refund(user.uid(), usage);
-            System.err.println("[QUESTIONS] generation failed (" + e.kind() + "): " + e.getMessage());
+            refund(user.uid(), credits, usage);
+            System.err.println("[QUESTIONS] " + action + " failed (" + e.kind() + "): " + e.getMessage());
             if (e.kind() == GenerationException.Kind.BAD_OUTPUT)
                 return fail(HttpStatus.BAD_GATEWAY, "bad_output",
-                        "The question service did not return a usable set this time. You were not charged. Please try again.", true);
+                        "The service did not return a usable result this time. You were not charged. Please try again.", true);
             return fail(HttpStatus.BAD_GATEWAY, "provider_unavailable",
-                    "The question service could not be reached right now. You were not charged. Please try again in a minute.", true);
+                    "The service could not be reached right now. You were not charged. Please try again in a minute.", true);
         } catch (RuntimeException e) {
-            refund(user.uid(), usage);
-            System.err.println("[QUESTIONS] unexpected failure: " + e.getClass().getSimpleName());
+            refund(user.uid(), credits, usage);
+            System.err.println("[QUESTIONS] " + action + " unexpected failure: " + e.getClass().getSimpleName());
             return fail(HttpStatus.INTERNAL_SERVER_ERROR, "question_service_error",
-                    "Something went wrong preparing your questions. You were not charged. Please try again.", true);
+                    "Something went wrong. You were not charged. Please try again.", true);
         }
     }
 
-    private void refund(String uid, UsageEventService.Context usage) {
+    private void refund(String uid, int credits, UsageEventService.Context usage) {
         try {
-            creditsService.refundCredits(uid, QUESTION_SET_CREDITS, usage);
+            creditsService.refundCredits(uid, credits, usage);
         } catch (RuntimeException e) {
-            System.err.println("[QUESTIONS] refund failed for a failed generation: " + e.getClass().getSimpleName());
+            System.err.println("[QUESTIONS] refund failed for a failed request: " + e.getClass().getSimpleName());
         }
+    }
+
+    private boolean allow(AuthUser user, HttpServletRequest request, String action, int perPersonPerMinute) {
+        return rateLimiter.tryAcquire("questions:ip:" + rateLimiter.clientIp(request), PER_ADDRESS_PER_MINUTE, 60_000L)
+                && rateLimiter.tryAcquire("questions:" + action + ":user:" + user.uid(), perPersonPerMinute, 60_000L);
     }
 
     private AuthUser verifyToken(String authHeader) {
@@ -119,6 +178,14 @@ public class QuestionController {
             System.err.println("[QUESTIONS] token verification failed: " + e.getClass().getSimpleName());
             return null;
         }
+    }
+
+    private static ResponseEntity<Map<String, Object>> notSignedIn() {
+        return fail(HttpStatus.UNAUTHORIZED, "not_signed_in", "Please sign in again.", false);
+    }
+
+    private static ResponseEntity<Map<String, Object>> rateLimited() {
+        return fail(HttpStatus.TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Please wait a minute and try again.", false);
     }
 
     static ResponseEntity<Map<String, Object>> fail(HttpStatus status, String code, String message, boolean refunded) {

@@ -181,6 +181,75 @@ class QuestionControllerTests {
         assertEquals("provider_unavailable", r.getBody().get("error"));
     }
 
+    // ------------------------------------------------------------------ feedback and script
+
+    private static Map<String, Object> answerBody() {
+        return Map.of("resume", RESUME, "jd", "Backend engineer", "question", "Tell me about a hard bug.",
+                "answer", "I traced a race in our retry queue and fixed it with an idempotency key.");
+    }
+
+    private static Map<String, Object> feedbackPayload() {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("score", 7.5);
+        m.put("strengths", List.of("Clear example"));
+        m.put("improvements", List.of("Say the result first"));
+        m.put("betterAnswerExample", "So for that, I traced a race in our retry queue.");
+        m.put("resume_proof", "retry queue");
+        return m;
+    }
+
+    @Test
+    void feedbackIsChargedOnceAndReturnsTheScoreAndTheBetterAnswer() throws Exception {
+        when(generator.feedback(any(), any(), any(), any())).thenReturn(feedbackPayload());
+        ResponseEntity<Map<String, Object>> r = controller.feedback("Bearer good", answerBody(), request);
+        assertEquals(HttpStatus.OK, r.getStatusCode());
+        assertEquals(7.5, r.getBody().get("score"));
+        assertNotNull(r.getBody().get("betterAnswerExample"));
+        verify(credits, times(1)).deductCredits(eq("user-1"), eq(5), any());
+        verify(credits, never()).refundCredits(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void feedbackThatFailsIsRefundedAndSaysSo() throws Exception {
+        when(generator.feedback(any(), any(), any(), any()))
+                .thenThrow(new GenerationException(GenerationException.Kind.PROVIDER_UNAVAILABLE, "down"));
+        ResponseEntity<Map<String, Object>> r = controller.feedback("Bearer good", answerBody(), request);
+        assertEquals(HttpStatus.BAD_GATEWAY, r.getStatusCode());
+        assertEquals("provider_unavailable", r.getBody().get("error"));
+        assertEquals(true, r.getBody().get("creditsRefunded"));
+        verify(credits, times(1)).refundCredits(eq("user-1"), eq(5), any());
+    }
+
+    @Test
+    void feedbackWithoutCreditsIsA402AndNothingIsAsked() throws Exception {
+        when(credits.deductCredits(eq("user-1"), eq(5), any())).thenReturn(false);
+        ResponseEntity<Map<String, Object>> r = controller.feedback("Bearer good", answerBody(), request);
+        assertEquals(HttpStatus.PAYMENT_REQUIRED, r.getStatusCode());
+        verify(generator, never()).feedback(any(), any(), any(), any());
+    }
+
+    @Test
+    void feedbackNeedsAnAnswerAndASignIn() throws Exception {
+        assertEquals(HttpStatus.BAD_REQUEST,
+                controller.feedback("Bearer good", Map.of("resume", RESUME, "question", "Why us?"), request).getStatusCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, controller.feedback(null, answerBody(), request).getStatusCode());
+        verify(credits, never()).deductCredits(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void aScriptIsChargedOnceAndRefundedWhenItFails() throws Exception {
+        when(generator.script(any(), any(), any(), any())).thenReturn(Map.of("betterAnswerExample", "Yeah so...", "resume_proof", "x"));
+        ResponseEntity<Map<String, Object>> ok = controller.script("Bearer good", answerBody(), request);
+        assertEquals(HttpStatus.OK, ok.getStatusCode());
+        verify(credits, times(1)).deductCredits(eq("user-1"), eq(5), any());
+
+        when(generator.script(any(), any(), any(), any()))
+                .thenThrow(new GenerationException(GenerationException.Kind.BAD_OUTPUT, "thin"));
+        ResponseEntity<Map<String, Object>> bad = controller.script("Bearer good", answerBody(), request);
+        assertEquals("bad_output", bad.getBody().get("error"));
+        verify(credits, times(1)).refundCredits(eq("user-1"), eq(5), any());
+    }
+
     @Test
     void theCountIsKeptBetweenTenAndFifty() {
         assertEquals(50, QuestionController.clampCount(null));
