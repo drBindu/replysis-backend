@@ -245,9 +245,10 @@ public class InterviewController {
                 ? creditsService.getGuestCredits(identity.deviceId())
                 : creditsService.getCredits(identity.uid());
         return ResponseEntity.ok(Map.of(
-                "credits",     credits.credits,
-                "plan",        credits.plan,
-                "isUnlimited", credits.isUnlimited
+                "credits",        credits.credits,
+                "plan",           credits.plan,
+                "isUnlimited",    credits.isUnlimited,
+                "minutesBalance", credits.minutesBalance
         ));
     }
 

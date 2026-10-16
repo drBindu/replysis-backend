@@ -75,7 +75,8 @@ public class UsageController {
                 "allowanceMinutes", usage.allowanceMinutes,
                 "remainingMinutes", usage.isUnlimited ? -1 : usage.remainingMinutes(),
                 "isUnlimited",      usage.isUnlimited,
-                "plan",             usage.plan));
+                "plan",             usage.plan,
+                "minutesBalance",   usage.minutesBalance));
     }
 
     /** Current standing without adding anything, for a screen that shows it. */
@@ -98,7 +99,8 @@ public class UsageController {
                 "allowanceMinutes", usage.allowanceMinutes,
                 "remainingMinutes", usage.isUnlimited ? -1 : usage.remainingMinutes(),
                 "isUnlimited",      usage.isUnlimited,
-                "plan",             usage.plan));
+                "plan",             usage.plan,
+                "minutesBalance",   usage.minutesBalance));
     }
 
     /**
