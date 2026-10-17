@@ -76,6 +76,39 @@ public class VoiceProofController {
         return xml(body);
     }
 
+    /**
+     * One phone test: Twilio calls the owner's phone, and a pretend interviewer speaks questions while the owner answers.
+     * The pretend interviewer is Twilio's own voice (the outbound track) and the owner is the inbound track, so both tracks
+     * carry speech with no second phone. Same checks as {@link #incoming}.
+     */
+    @PostMapping(value = "/demo", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> demo(
+            @RequestParam Map<String, String> params,
+            @RequestHeader(value = "X-Twilio-Signature", required = false) String signature) {
+
+        if (!enabled()) return ResponseEntity.notFound().build();
+        String url = publicBase() + "/api/v1/voice/demo";
+        if (!TwilioSignature.valid(authToken(), url, params, signature)) {
+            System.err.println("[VOICE] Rejected a demo webhook with a wrong signature");
+            return ResponseEntity.status(403).build();
+        }
+        String callSid = params.getOrDefault("CallSid", "");
+        System.out.println("[VOICE] Demo call " + redact(callSid) + " answered, streaming both tracks");
+        String wsUrl = publicBase().replaceFirst("^http", "ws") + "/api/v1/voice/media";
+        String body = "<Response>"
+                + "<Start><Stream url=\"" + wsUrl + "\" track=\"both_tracks\">"
+                + "<Parameter name=\"callSid\" value=\"" + escape(callSid) + "\"/>"
+                + "<Parameter name=\"sig\" value=\"" + mediaSignature(callSid) + "\"/>"
+                + "</Stream></Start>"
+                + "<Say>Hello. This is a test interviewer. Question one. Tell me about a challenging project you worked on.</Say>"
+                + "<Pause length=\"14\"/>"
+                + "<Say>Question two. Why do you want this role?</Say>"
+                + "<Pause length=\"14\"/>"
+                + "<Say>Thank you. That is the end of the test.</Say>"
+                + "</Response>";
+        return xml(body);
+    }
+
     /** What the media socket must present to prove it belongs to this call. */
     static String mediaSignature(String callSid) {
         String token = authToken();
