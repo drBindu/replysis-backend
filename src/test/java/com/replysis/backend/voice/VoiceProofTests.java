@@ -68,4 +68,12 @@ class VoiceProofTests {
         if (System.getenv("TWILIO_AUTH_TOKEN") == null) assertEquals("", VoiceProofController.mediaSignature("CA1"));
         assertEquals("CA12...CDEF", VoiceProofController.redact("CA123456789ABCDEF"));
     }
+
+    @Test
+    void anUnsignedRelayIsRefusedUnlessTheAccountIsConfigured() {
+        // The environment variable is not set in tests, so no unsigned request can ever pass here.
+        Map<String, String> p = Map.of("AccountSid", "ACx", "From", "+15550001111");
+        assertFalse(VoiceProofController.trialRelayAllowed(p, "+15550001111"));
+        assertFalse(VoiceProofController.trialRelayAllowed(p, null));
+    }
 }

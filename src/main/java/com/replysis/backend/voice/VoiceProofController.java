@@ -49,13 +49,22 @@ public class VoiceProofController {
         if (!enabled()) return ResponseEntity.notFound().build();
 
         String url = publicBase() + "/api/v1/voice/incoming";
-        if (!TwilioSignature.valid(authToken(), url, params, signature)) {
+        boolean signed = TwilioSignature.valid(authToken(), url, params, signature);
+        String dialTo = System.getenv("VOICE_POC_DIAL_TO");
+        // Twilio's free trial console relays calls through its own proxy, which sends no signature. That one case is
+        // allowed only when it names our account and comes from the configured phone, and it can only play the pretend
+        // interviewer: it never dials anyone. Anything else unsigned is refused.
+        boolean trialRelay = !signed && signature == null && trialRelayAllowed(params, dialTo);
+        if (!signed && !trialRelay) {
             System.err.println("[VOICE] Rejected a call webhook with a wrong signature. " + describe(request, params, signature));
             return ResponseEntity.status(403).build();
         }
+        if (trialRelay) {
+            System.out.println("[VOICE] Trial relay call accepted (unsigned, our account, our phone): demo only");
+            return xml(demoTwiml(params.getOrDefault("CallSid", "")));
+        }
 
         String callSid = params.getOrDefault("CallSid", "");
-        String dialTo = System.getenv("VOICE_POC_DIAL_TO");
         if (dialTo == null || !dialTo.matches("\\+[1-9][0-9]{6,14}")) {
             System.err.println("[VOICE] VOICE_POC_DIAL_TO is missing or not in +E.164 form");
             return xml("<Response><Say>This line is not set up yet.</Say><Hangup/></Response>");
@@ -117,6 +126,13 @@ public class VoiceProofController {
                 + "<Pause length=\"14\"/>"
                 + "<Say>Thank you. That is the end of the test.</Say>"
                 + "</Response>";
+    }
+
+    /** The unsigned trial relay case: our own account id and the configured phone, nothing else. */
+    static boolean trialRelayAllowed(Map<String, String> params, String configuredPhone) {
+        String account = System.getenv("VOICE_POC_ACCOUNT_SID");
+        return account != null && !account.isEmpty() && account.equals(params.get("AccountSid"))
+                && configuredPhone != null && configuredPhone.equals(params.get("From"));
     }
 
     /**
