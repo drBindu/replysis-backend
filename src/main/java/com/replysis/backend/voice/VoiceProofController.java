@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.servlet.http.HttpServletRequest;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
@@ -42,13 +43,14 @@ public class VoiceProofController {
     @PostMapping(value = "/incoming", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> incoming(
             @RequestParam Map<String, String> params,
-            @RequestHeader(value = "X-Twilio-Signature", required = false) String signature) {
+            @RequestHeader(value = "X-Twilio-Signature", required = false) String signature,
+            HttpServletRequest request) {
 
         if (!enabled()) return ResponseEntity.notFound().build();
 
         String url = publicBase() + "/api/v1/voice/incoming";
         if (!TwilioSignature.valid(authToken(), url, params, signature)) {
-            System.err.println("[VOICE] Rejected a call webhook with a wrong signature");
+            System.err.println("[VOICE] Rejected a call webhook with a wrong signature. " + describe(request, params, signature));
             return ResponseEntity.status(403).build();
         }
 
@@ -88,12 +90,13 @@ public class VoiceProofController {
     @PostMapping(value = "/demo", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> demo(
             @RequestParam Map<String, String> params,
-            @RequestHeader(value = "X-Twilio-Signature", required = false) String signature) {
+            @RequestHeader(value = "X-Twilio-Signature", required = false) String signature,
+            HttpServletRequest request) {
 
         if (!enabled()) return ResponseEntity.notFound().build();
         String url = publicBase() + "/api/v1/voice/demo";
         if (!TwilioSignature.valid(authToken(), url, params, signature)) {
-            System.err.println("[VOICE] Rejected a demo webhook with a wrong signature");
+            System.err.println("[VOICE] Rejected a demo webhook with a wrong signature. " + describe(request, params, signature));
             return ResponseEntity.status(403).build();
         }
         return xml(demoTwiml(params.getOrDefault("CallSid", "")));
@@ -114,6 +117,19 @@ public class VoiceProofController {
                 + "<Pause length=\"14\"/>"
                 + "<Say>Thank you. That is the end of the test.</Say>"
                 + "</Response>";
+    }
+
+    /**
+     * What a refused webhook looked like, for working out why, with nothing secret in it: whether a signature came, which
+     * parameter names, which header names and the sender's user agent. Values, tokens and numbers are never logged.
+     */
+    static String describe(HttpServletRequest request, Map<String, String> params, String signature) {
+        java.util.List<String> headers = java.util.Collections.list(request.getHeaderNames());
+        return "signature header " + (signature == null ? "absent" : "present, " + signature.length() + " chars")
+                + "; params " + new java.util.TreeSet<>(params.keySet())
+                + "; headers " + new java.util.TreeSet<>(headers)
+                + "; user agent " + request.getHeader("User-Agent")
+                + "; content type " + request.getContentType();
     }
 
     /** What the media socket must present to prove it belongs to this call. */
