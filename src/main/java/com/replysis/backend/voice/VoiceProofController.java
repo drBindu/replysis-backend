@@ -59,6 +59,10 @@ public class VoiceProofController {
             return xml("<Response><Say>This line is not set up yet.</Say><Hangup/></Response>");
         }
 
+        // The configured phone calling its own Twilio number cannot be connected to itself: that is the one phone test,
+        // so a pretend interviewer plays instead of a second leg being dialled.
+        if (dialTo.equals(params.getOrDefault("From", ""))) return xml(demoTwiml(callSid));
+
         // The number the interviewer reached on our side is the caller id of the second leg: Twilio only lets a call
         // present a number it owns, and presenting the original caller's number would be refused.
         String ourNumber = params.getOrDefault("To", "");
@@ -92,10 +96,14 @@ public class VoiceProofController {
             System.err.println("[VOICE] Rejected a demo webhook with a wrong signature");
             return ResponseEntity.status(403).build();
         }
-        String callSid = params.getOrDefault("CallSid", "");
+        return xml(demoTwiml(params.getOrDefault("CallSid", "")));
+    }
+
+    /** The pretend interviewer: Twilio's voice asks two questions with pauses to answer in, while both tracks stream to us. */
+    private static String demoTwiml(String callSid) {
         System.out.println("[VOICE] Demo call " + redact(callSid) + " answered, streaming both tracks");
         String wsUrl = publicBase().replaceFirst("^http", "ws") + "/api/v1/voice/media";
-        String body = "<Response>"
+        return "<Response>"
                 + "<Start><Stream url=\"" + wsUrl + "\" track=\"both_tracks\">"
                 + "<Parameter name=\"callSid\" value=\"" + escape(callSid) + "\"/>"
                 + "<Parameter name=\"sig\" value=\"" + mediaSignature(callSid) + "\"/>"
@@ -106,7 +114,6 @@ public class VoiceProofController {
                 + "<Pause length=\"14\"/>"
                 + "<Say>Thank you. That is the end of the test.</Say>"
                 + "</Response>";
-        return xml(body);
     }
 
     /** What the media socket must present to prove it belongs to this call. */
