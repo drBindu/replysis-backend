@@ -115,7 +115,10 @@ public class SttController {
     public ResponseEntity<?> getSttKey(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
             @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            @RequestParam(value = "purpose", required = false) String purpose,
             HttpServletRequest request) {
+        // A mock interview is practice: bought interview minutes do not open it, answers do.
+        final boolean live = !"mock".equals(purpose);
 
         // 1. Verify Firebase token, or fall back to the free guest trial by device ID
         RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
@@ -137,7 +140,8 @@ public class SttController {
         //    a drained guest device or empty free account gets 402, not a token.
         boolean canAfford = identity.isGuest()
                 ? creditsService.canAffordGuest(identity.deviceId())
-                : creditsService.canAfford(identity.uid());
+                : live ? creditsService.canAfford(identity.uid())
+                       : creditsService.canAfford(identity.uid(), FirestoreCreditsService.INTERVIEW_QUESTION_COST);
         if (!canAfford) {
             return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
                     .body(Map.of("error", "No credits remaining"));
@@ -149,7 +153,7 @@ public class SttController {
         //     door to transcription: no token, no audio, no bill.
         boolean hasAudioTime = identity.isGuest()
                 ? creditsService.hasGuestAudioTimeLeft(identity.deviceId())
-                : creditsService.hasAudioTimeLeft(identity.uid());
+                : creditsService.hasAudioTimeLeft(identity.uid(), live);
         if (!hasAudioTime) {
             return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
                     .body(Map.of("error", "You have reached this month's limit.",

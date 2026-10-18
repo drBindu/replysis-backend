@@ -37,14 +37,14 @@ class SttKeyOrderTests {
     }
 
     private ResponseEntity<?> ask(SttController controller) {
-        return controller.getSttKey("Bearer x", null, new MockHttpServletRequest());
+        return controller.getSttKey("Bearer x", null, null, new MockHttpServletRequest());
     }
 
     @Test
     void anAccountWithNoListeningTimeIsToldSoEveryTimeAndNeverRateLimited() {
         var credits = mock(FirestoreCreditsService.class);
         when(credits.canAfford("uid-1")).thenReturn(true);
-        when(credits.hasAudioTimeLeft("uid-1")).thenReturn(false);
+        when(credits.hasAudioTimeLeft("uid-1", true)).thenReturn(false);
         var controller = controller(credits);
 
         for (int i = 1; i <= 60; i++) {
@@ -69,11 +69,11 @@ class SttKeyOrderTests {
     void refusalsDoNotSpendTheMintBudgetSoARestoredAccountCanStartAtOnce() {
         var credits = mock(FirestoreCreditsService.class);
         when(credits.canAfford("uid-1")).thenReturn(true);
-        when(credits.hasAudioTimeLeft("uid-1")).thenReturn(false);
+        when(credits.hasAudioTimeLeft("uid-1", true)).thenReturn(false);
         var controller = controller(credits);
         for (int i = 0; i < 40; i++) ask(controller);            // refused forty times
 
-        when(credits.hasAudioTimeLeft("uid-1")).thenReturn(true); // then the allowance is restored
+        when(credits.hasAudioTimeLeft("uid-1", true)).thenReturn(true); // then the allowance is restored
         var response = ask(controller);
 
         // Past every limit. It stops at "key not configured" only because this test gives it none.
@@ -84,7 +84,7 @@ class SttKeyOrderTests {
     void theStrictLimitStillStopsTokenFarming() {
         var credits = mock(FirestoreCreditsService.class);
         when(credits.canAfford("uid-1")).thenReturn(true);
-        when(credits.hasAudioTimeLeft("uid-1")).thenReturn(true);
+        when(credits.hasAudioTimeLeft("uid-1", true)).thenReturn(true);
         var controller = controller(credits);
 
         int mintsAttempted = 0;

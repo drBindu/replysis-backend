@@ -66,7 +66,8 @@ public class UsageController {
 
         AudioUsage usage = identity.isGuest()
                 ? creditsService.addGuestListeningMinutes(identity.deviceId(), minutes)
-                : creditsService.addListeningMinutes(identity.uid(), minutes);
+                : creditsService.addListeningMinutes(identity.uid(), minutes,
+                        body == null || !"mock".equals(body.get("purpose")));
 
         // The answer carries what is left, so an app can warn before the cap is
         // reached rather than discovering it when transcription stops.

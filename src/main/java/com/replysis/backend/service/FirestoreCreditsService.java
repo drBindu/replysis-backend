@@ -197,6 +197,14 @@ public class FirestoreCreditsService {
      * from here, and the second one is what a bill is made of.
      */
     public AudioUsage addListeningMinutes(String uid, int minutes) {
+        return addListeningMinutes(uid, minutes, true);
+    }
+
+    /**
+     * live: listening for a real interview, which bought minutes pay for. A mock interview passes false, so its listening
+     * counts toward the month and never uses bought minutes (owner, 2026-10-18: minutes are for live interviews only).
+     */
+    public AudioUsage addListeningMinutes(String uid, int minutes, boolean live) {
         if (minutes < 0) minutes = 0;
         // A single report cannot be worth more than a long interview. Guards
         // against a client with a broken clock donating someone else's month.
@@ -222,7 +230,8 @@ public class FirestoreCreditsService {
 
                 // Bought interview minutes (India, Rs 5 a minute) are spent first; only what is left over
                 // counts toward the monthly guard, so paid minutes never eat a plan's allowance.
-                long[] split = spendMinutes(readLong(snap, "minutesBalance"), add);
+                long[] split = spendMinutes(live ? readLong(snap, "minutesBalance") : 0, add);
+                if (!live) split[0] = Math.max(0, readLong(snap, "minutesBalance"));
                 long balance = split[0];
                 used += split[1];
                 // Reports arrive once a minute while a microphone is live, so a recent
@@ -291,8 +300,23 @@ public class FirestoreCreditsService {
 
     /** True while the caller still has listening time left this month, or bought minutes left. */
     public boolean hasAudioTimeLeft(String uid) {
+        return hasAudioTimeLeft(uid, true);
+    }
+
+    /** live false (mock interview): bought minutes do not count, only the month's listening. */
+    public boolean hasAudioTimeLeft(String uid, boolean live) {
         AudioUsage usage = addListeningMinutes(uid, 0);
-        return usage.isUnlimited || usage.minutesBalance > 0 || usage.usedMinutes < usage.allowanceMinutes;
+        return usage.isUnlimited || (live && usage.minutesBalance > 0) || usage.usedMinutes < usage.allowanceMinutes;
+    }
+
+    /**
+     * Bought interview minutes pay for live interview answers and screen reads only. Resume tools, mock interview
+     * questions and feedback are always charged in answers, even with minutes left (owner, 2026-10-18: a Rs 60 pack
+     * that is never spent on listening must not unlock every paid tool for ever).
+     */
+    static boolean minutesCover(UsageEventService.Context context) {
+        return context != null && (UsageEventService.ACTION_ANSWER.equals(context.action())
+                || UsageEventService.ACTION_SCREEN.equals(context.action()));
     }
 
     /**
@@ -377,13 +401,16 @@ public class FirestoreCreditsService {
         }
     }
 
+    /** The door to a live interview: bought minutes count. */
     public boolean canAfford(String uid) {
-        return canAfford(uid, INTERVIEW_QUESTION_COST);
+        UserCredits current = getCredits(uid);
+        return current.isUnlimited || current.minutesBalance > 0 || current.credits >= INTERVIEW_QUESTION_COST;
     }
 
+    /** Anything else (mock interview, resume tools): answers only, bought minutes do not count. */
     public boolean canAfford(String uid, int cost) {
         UserCredits current = getCredits(uid);
-        return cost >= 0 && (current.isUnlimited || current.minutesBalance > 0 || current.credits >= cost);
+        return cost >= 0 && (current.isUnlimited || current.credits >= cost);
     }
 
     public boolean deductCredits(String uid) {
@@ -416,7 +443,7 @@ public class FirestoreCreditsService {
                 String plan = normalizePlan(snap.getString("plan"));
                 if (isUnlimitedPlan(plan)) { charged.set(false); return true; }
                 // Bought interview minutes pay for the time, so answers inside it are not charged credits.
-                if (readLong(snap, "minutesBalance") > 0) { charged.set(false); return true; }
+                if (minutesCover(context) && readLong(snap, "minutesBalance") > 0) { charged.set(false); return true; }
                 long credits = readCredits(snap);
                 long creditsUsed = readLong(snap, "creditsUsed");
                 Instant resetAt = readResetDate(snap);
@@ -533,7 +560,7 @@ public class FirestoreCreditsService {
                 String plan = normalizePlan(snap.getString("plan"));
                 if (isUnlimitedPlan(plan)) return false;
                 // Answered inside bought minutes, so nothing was taken and nothing is given back.
-                if (readLong(snap, "minutesBalance") > 0) return false;
+                if (minutesCover(context) && readLong(snap, "minutesBalance") > 0) return false;
                 int cap = monthlyCredits(plan);
                 long credits = readCredits(snap);
                 long creditsUsed = readLong(snap, "creditsUsed");
