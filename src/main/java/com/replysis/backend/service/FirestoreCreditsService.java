@@ -136,7 +136,7 @@ public class FirestoreCreditsService {
     // answer, which is the whole job of a free tier, and it costs a quarter as
     // much. The paid allowances are untouched.
     private static final Map<String, Integer> PLAN_MONTHLY_AUDIO_MINUTES = Map.of(
-            "free",       15,      //  15 minutes
+            "free",       10,      //  10 minutes
             "pro",       900,      // 15 hours
             "max",     1_800,      // 30 hours
             "lifetime",1_800,
@@ -147,7 +147,7 @@ public class FirestoreCreditsService {
     // behind it, and a new device identifier resets it. It was twice what a
     // registered free user got, which is backwards: the harder allowance to
     // police was the larger one. It matches the free tier now.
-    private static final int GUEST_FREE_AUDIO_MINUTES = 15;
+    private static final int GUEST_FREE_AUDIO_MINUTES = 10;
 
     public static int monthlyAudioMinutes(String plan) {
         return PLAN_MONTHLY_AUDIO_MINUTES.getOrDefault(normalizePlan(plan),
