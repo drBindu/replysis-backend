@@ -211,9 +211,17 @@ public class ResumeTailorService {
             + "\"experience\":[{\"company\":\"\",\"role\":\"\",\"location\":\"\",\"period\":\"\",\"bullets\":[\"\"]}],"
             + "\"projects\":[{\"title\":\"\",\"tech\":\"\",\"period\":\"\",\"bullets\":[\"\"]}],"
             + "\"education\":[{\"school\":\"\",\"degree\":\"\",\"period\":\"\",\"gpa\":\"\"}],"
-            + "\"certifications\":[\"\"]}\n"
-            + "headline is the person's title line under their name if there is one. Skills keep the resume's own grouping when it has one.";
-        String content = callGemini(sys, "Resume text:\n" + text, LITE_MODEL);
+            + "\"certifications\":[\"\"],"
+            + "\"otherSections\":[{\"title\":\"\",\"items\":[{\"title\":\"\",\"subtitle\":\"\",\"date\":\"\",\"description\":\"\"}]}]}\n"
+            + "headline is the person's title line under their name if there is one. Skills keep the resume's own grouping when it has one.\n"
+            + "otherSections holds every section that does not fit above (awards, achievements, languages, publications, "
+            + "volunteering, leadership, interests, references and so on), with the resume's own section title.\n"
+            + "EVERY line of the resume must land somewhere. Nothing may be dropped. Keep every bullet of every job, in order.";
+        // Every resume is laid out differently; the stronger model reads unusual layouts far more reliably. Lite is the backup.
+        String content;
+        try { content = callGemini(sys, "Resume text:\n" + text, TAILOR_MODEL); }
+        catch (RuntimeException strongFailed) { content = null; }
+        if (content == null || content.isBlank()) content = callGemini(sys, "Resume text:\n" + text, LITE_MODEL);
         if (content == null || content.isBlank()) throw new RuntimeException("The import came back empty. Please try again.");
         content = cleanJson(content);
         try { new ObjectMapper().readTree(content); }
