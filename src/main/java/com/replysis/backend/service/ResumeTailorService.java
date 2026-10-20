@@ -107,6 +107,34 @@ public class ResumeTailorService {
                 + "OUTPUT: Return ONLY a valid JSON object. No markdown. No backticks. No explanation.\n"
                 + "Start with { and end with }.";
 
+            if (sections.contains("full_match")) {
+                // Full match: the whole resume is rewritten toward the job. Verifiable facts (companies, dates,
+                // numbers, schools, contact details) stay exactly as written; the safety net enforces that too.
+                sys = "You are an expert resume writer. Rewrite this resume so it fully matches the job post. Every section must "
+                    + "read as if written for this exact job, and every requirement and responsibility in the job post must appear "
+                    + "somewhere in the resume.\n\n"
+                    + "NEVER CHANGE: company names, employment dates, school names, degrees, certifications, contact details, and any "
+                    + "number already in the resume (keep every number exactly). Never invent new numbers, percentages or metrics.\n\n"
+                    + "RULES:\n"
+                    + "1. personalInfo: copy exactly, except headline.\n"
+                    + "2. headline: the job post's own job title, then 2 to 4 of its most important skills.\n"
+                    + "3. summary: 3 to 5 sentences written for this job, using the job post's language and its key requirements, "
+                    + "connected to what the person has done.\n"
+                    + "4. skillCategories: every skill, tool and method the job post names, plus the resume's own relevant skills, "
+                    + "grouped into clear categories, job post skills first.\n"
+                    + "5. experience: keep company, location and period exactly. Rewrite each role title to the closest title for this "
+                    + "job at the same level (for example Software Engineer becomes AI Solutions Engineer for an AI role). Rewrite "
+                    + "EVERY bullet in the job post's language so it shows the responsibilities this job asks for, built on what the "
+                    + "original bullet did. Keep at least as many bullets as before; add bullets where needed so each job "
+                    + "responsibility appears at least once. Strong action verbs. No new numbers.\n"
+                    + "6. projects: keep title and period; rewrite tech and bullets toward the job post's tools and goals.\n"
+                    + "7. education and certifications: copy exactly.\n"
+                    + "8. fit: add a top level field \"fit\" = {\"strengths\": [up to 4 short phrases: what the person really has that "
+                    + "matches], \"gaps\": [up to 4 short phrases: what was reframed or added that the person must be ready to "
+                    + "back up in an interview]}. Plain words, no dashes.\n\n"
+                    + "OUTPUT: Return ONLY a valid JSON object with the same structure as the resume plus fit. No markdown.";
+            }
+
             String user = "Resume JSON:\n" + resumeJson + "\n\nJob Description:\n" + jdTrunc;
 
             String content = null;
@@ -311,6 +339,11 @@ public class ResumeTailorService {
             List<Map<String, Object>> ol = (List<Map<String, Object>>) o, nl = (List<Map<String, Object>>) n;
             if (nl.size() < ol.size()) { out.put(key, ol); continue; }   // an entry went missing: keep the original section
             for (int i = 0; i < ol.size(); i++) {
+                // Facts a background check verifies always come from the original.
+                for (String f : List.of("company", "period", "location", "title")) {
+                    if (key.equals("projects") && !f.equals("title") && !f.equals("period")) continue;
+                    if (ol.get(i).containsKey(f)) nl.get(i).put(f, ol.get(i).get(f));
+                }
                 List<String> ob = (List<String>) ol.get(i).get("bullets"), nb = (List<String>) nl.get(i).get("bullets");
                 if (ob != null && (nb == null || nb.size() < ob.size())) nl.get(i).put("bullets", ob);
             }

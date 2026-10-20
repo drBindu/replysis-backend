@@ -169,6 +169,12 @@ public class ResumeController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Invalid tailoring options."));
             if (sectionsToEnhance.isEmpty())
                 sectionsToEnhance = List.of("summary", "skills", "experience", "projects");
+            // Full match (owner, 2026-10-20): rewrite the whole resume toward the job, role titles included.
+            // Carried as a marker in the section list so the service signature stays the same.
+            if ("full".equals(payload.get("mode"))) {
+                sectionsToEnhance = new java.util.ArrayList<>(sectionsToEnhance);
+                sectionsToEnhance.add("full_match");
+            }
 
             String provider = boundedText(payload.getOrDefault("provider", "gemini"), 20);
             if (provider == null) return ResponseEntity.badRequest().body(Map.of("error", "Invalid provider."));
