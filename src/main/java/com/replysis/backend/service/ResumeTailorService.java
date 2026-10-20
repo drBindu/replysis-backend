@@ -68,8 +68,9 @@ public class ResumeTailorService {
                 + "percentage, achievement, tool or skill that is not in the resume. If a bullet has no number, do not add one.\n\n"
                 + "RULES — follow EVERY rule precisely:\n\n"
                 + "1. personalInfo: COPY EXACTLY. Never change name, email, phone, location, linkedin, github, portfolio, or customLinks.\n\n"
-                + "2. headline: Rewrite to match JD role title + 4-6 JD technologies. Min 6 words.\n"
-                + "   Example: \"Senior Java Developer | Spring Boot | AWS | Kubernetes | React | CI/CD\"\n\n"
+                + "2. headline: Lead with the role or focus the job post asks for (its job title, or its area such as AI and ML), "
+                + "then 3-5 of the person's own skills that match the job, most relevant first. Only skills the resume shows.\n"
+                + "   Example for an AI and ML post: \"Software Engineer, AI and ML | Python | TensorFlow | AWS\"\n\n"
                 + "3. summary: " + (sections.contains("summary")
                     ? "Rewrite as 3-5 sentences aimed at the job post's role, using only facts from the resume. Mention the job post's technologies only where the resume shows them."
                     : "Keep exactly as-is.") + "\n\n"
