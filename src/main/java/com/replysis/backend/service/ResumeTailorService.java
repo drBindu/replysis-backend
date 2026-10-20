@@ -71,7 +71,7 @@ public class ResumeTailorService {
                 + "THE ONE RULE ABOVE ALL: every fact must come from the resume. Never add an employer, title, date, number, metric, "
                 + "percentage, achievement, tool or skill that is not in the resume. If a bullet has no number, do not add one.\n\n"
                 + "RULES — follow EVERY rule precisely:\n\n"
-                + "1. personalInfo: COPY EXACTLY. Never change name, email, phone, location, linkedin, github, portfolio, or customLinks.\n\n"
+                + "1. personalInfo: COPY EXACTLY, except headline (rule 2). Never change name, email, phone, location, linkedin, github, portfolio, or customLinks.\n\n"
                 + "2. headline: ALWAYS rewrite it for this job. Start with the job's title as the post names it; if the post names no clear "
                 + "title, name its focus in 2 to 5 words (for example \"AI Training and Enablement\"). Then 2 to 4 of the person's own "
                 + "strengths or skills that match the job, most relevant first.\n"
@@ -123,7 +123,7 @@ public class ResumeTailorService {
             content = cleanJson(content);
             System.out.println("Response length: " + content.length() + " chars");
 
-            try { om.readTree(content); }
+            try { content = keepWhatMustNotChange(om, resume, content); }
             catch (Exception parseEx) {
                 // Log the shape of the failure, never the text: this content is the
                 // candidate's tailored resume and must not land in server logs.
@@ -250,24 +250,8 @@ public class ResumeTailorService {
             String json = om.writeValueAsString(resume);
             Map<String, Object> slim = om.readValue(json, Map.class);
 
-            List<Map<String, Object>> exp = (List<Map<String, Object>>) slim.get("experience");
-            if (exp != null) {
-                for (Map<String, Object> e : exp) {
-                    List<String> bullets = (List<String>) e.get("bullets");
-                    if (bullets != null && bullets.size() > 4)
-                        e.put("bullets", bullets.subList(0, 4));
-                }
-            }
-
-            List<Map<String, Object>> projects = (List<Map<String, Object>>) slim.get("projects");
-            if (projects != null) {
-                for (Map<String, Object> p : projects) {
-                    List<String> bullets = (List<String>) p.get("bullets");
-                    if (bullets != null && bullets.size() > 4)
-                        p.put("bullets", bullets.subList(0, 4));
-                }
-            }
-
+            // Every bullet goes to the model. This used to keep only the first 4 per job, and the tailored resume
+            // came back without the rest: a 5th bullet (often mentoring or leadership) was silently deleted.
             return slim;
         } catch (Exception e) {
             // This runs over the candidate's resume, so the exception message can
@@ -275,6 +259,34 @@ public class ResumeTailorService {
             System.err.println("buildSlimResume failed: " + e.getClass().getSimpleName());
             return resume;
         }
+    }
+
+    // ── Safety net: whatever the model returns, contact details stay as written and no bullet is lost ──
+    @SuppressWarnings("unchecked")
+    private String keepWhatMustNotChange(ObjectMapper om, Map<String, Object> original, String content) throws Exception {
+        Map<String, Object> out = om.readValue(content, Map.class);
+        Map<String, Object> origInfo = (Map<String, Object>) original.get("personalInfo");
+        if (origInfo != null) {
+            Map<String, Object> info = new java.util.LinkedHashMap<>(origInfo);
+            Object newInfo = out.get("personalInfo");
+            if (newInfo instanceof Map && ((Map<String, Object>) newInfo).get("headline") instanceof String h && !h.isBlank())
+                info.put("headline", h);
+            out.put("personalInfo", info);
+        }
+        for (String key : List.of("experience", "projects")) {
+            Object o = original.get(key), n = out.get(key);
+            if (!(o instanceof List) || !(n instanceof List)) { if (o != null) out.put(key, o); continue; }
+            List<Map<String, Object>> ol = (List<Map<String, Object>>) o, nl = (List<Map<String, Object>>) n;
+            if (nl.size() < ol.size()) { out.put(key, ol); continue; }   // an entry went missing: keep the original section
+            for (int i = 0; i < ol.size(); i++) {
+                List<String> ob = (List<String>) ol.get(i).get("bullets"), nb = (List<String>) nl.get(i).get("bullets");
+                if (ob != null && (nb == null || nb.size() < ob.size())) nl.get(i).put("bullets", ob);
+            }
+        }
+        for (String key : List.of("education", "certifications"))
+            if (original.containsKey(key)) out.put(key, original.get(key));
+        for (Map.Entry<String, Object> e : original.entrySet()) out.putIfAbsent(e.getKey(), e.getValue());   // nothing the model skipped is lost
+        return om.writeValueAsString(out);
     }
 
     // ── Helpers ──
