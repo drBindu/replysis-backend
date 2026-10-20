@@ -169,9 +169,9 @@ public class ResumeController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Invalid tailoring options."));
             if (sectionsToEnhance.isEmpty())
                 sectionsToEnhance = List.of("summary", "skills", "experience", "projects");
-            // Full match (owner, 2026-10-20): rewrite the whole resume toward the job, role titles included.
+            // Full match is the default (owner, 2026-10-20): rewrite the whole resume toward the job, role titles included.
             // Carried as a marker in the section list so the service signature stays the same.
-            if ("full".equals(payload.get("mode"))) {
+            if (!"honest".equals(payload.get("mode"))) {   // full is the default
                 sectionsToEnhance = new java.util.ArrayList<>(sectionsToEnhance);
                 sectionsToEnhance.add("full_match");
             }
