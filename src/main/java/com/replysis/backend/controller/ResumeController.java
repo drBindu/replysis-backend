@@ -128,7 +128,9 @@ public class ResumeController {
         AuthUser user = verifyToken(authHeader);
         if (user == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Authentication required"));
-        if (!allowAiRequest(user, request, "resume-import"))
+        // Upload is free and people retry a file or try a second one, so it allows twice the usual AI rate.
+        if (!(rateLimiter.tryAcquire("resume-import:ip:" + rateLimiter.clientIp(request), 12, 60_000L)
+                && rateLimiter.tryAcquire("resume-import:user:" + user.uid(), 6, 60_000L)))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "Too many requests. Please try again shortly."));
         String text = boundedText(payload.get("text"), 30_000);
         if (text == null || text.isBlank() || text.trim().length() < 40)
