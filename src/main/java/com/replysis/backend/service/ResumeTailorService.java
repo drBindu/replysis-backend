@@ -55,54 +55,39 @@ public class ResumeTailorService {
             System.out.println("Slim resume : " + resumeJson.length() + " chars");
             System.out.println("JD (used)   : " + jdTrunc.length() + " chars");
 
+            // Honest tailoring (owner, 2026-10-20): the old rules demanded 5+ bullets per job, a metric in every bullet
+            // and every skill in the job post, so the model invented achievements and skills the person never had.
+            // Recruiters check. It now rewords, reorders and emphasises what is really there, and invents nothing.
             String skillsInstr = selectedSkills.isEmpty()
-                ? "Extract EVERY skill, technology, tool, platform, and methodology from the JD."
-                : "MUST include: [" + String.join(", ", selectedSkills) + "]. Also add ALL other JD skills.";
+                ? "Keep only skills the resume already shows. Put the ones the job post asks for first, using the job post's wording for the same thing."
+                : "Keep only skills the resume already shows, plus these the person confirmed they have: [" + String.join(", ", selectedSkills) + "].";
 
             // ── ENHANCED PROMPT — enforces rich, detailed output ──
-            String sys = "You are a world-class resume tailoring expert. You produce DETAILED, RICH resumes.\n\n"
+            String sys = "You are an expert resume editor. You tailor a real person's resume to a job post WITHOUT inventing anything.\n\n"
+                + "THE ONE RULE ABOVE ALL: every fact must come from the resume. Never add an employer, title, date, number, metric, "
+                + "percentage, achievement, tool or skill that is not in the resume. If a bullet has no number, do not add one.\n\n"
                 + "RULES — follow EVERY rule precisely:\n\n"
                 + "1. personalInfo: COPY EXACTLY. Never change name, email, phone, location, linkedin, github, portfolio, or customLinks.\n\n"
                 + "2. headline: Rewrite to match JD role title + 4-6 JD technologies. Min 6 words.\n"
                 + "   Example: \"Senior Java Developer | Spring Boot | AWS | Kubernetes | React | CI/CD\"\n\n"
                 + "3. summary: " + (sections.contains("summary")
-                    ? "Rewrite as 5-7 sentences, minimum 80 words. Must reference the JD role title and 6+ technologies from the JD. Include years of experience and 2-3 quantified achievements."
+                    ? "Rewrite as 3-5 sentences aimed at the job post's role, using only facts from the resume. Mention the job post's technologies only where the resume shows them."
                     : "Keep exactly as-is.") + "\n\n"
                 + "4. skillCategories: " + (sections.contains("skills")
-                    ? "MUST produce AT LEAST 6 categories, each with 5-8 skills. Extract ALL technologies from the JD.\n"
-                    + "   Required categories (adapt names to match JD):\n"
-                    + "   - Languages (e.g., Java, Python, TypeScript, SQL, Go)\n"
-                    + "   - Frameworks & Libraries (e.g., Spring Boot, React, Next.js, Express)\n"
-                    + "   - Cloud & Infrastructure (e.g., AWS, Docker, Kubernetes, Terraform)\n"
-                    + "   - Databases & Storage (e.g., PostgreSQL, MongoDB, Redis, DynamoDB)\n"
-                    + "   - Testing & Quality (e.g., JUnit, Jest, Cypress, Selenium, SonarQube)\n"
-                    + "   - Tools & Methodologies (e.g., Git, Jira, Agile, Scrum, CI/CD, Figma)\n"
-                    + "   Add MORE categories if the JD mentions areas like ML/AI, Security, Mobile, etc."
+                    ? "Regroup the resume's own skills into clear categories (for example Languages, Frameworks, Cloud, Databases, Tools). "
+                    + "Order each category so the skills the job post asks for come first. Add nothing the resume does not show."
                     : skillsInstr) + "\n\n"
                 + "5. experience: " + (sections.contains("experience")
-                    ? "Keep company, role, location, period EXACTLY as-is.\n"
-                    + "   REWRITE bullets using STAR method. Each bullet MUST have a quantified metric.\n"
-                    + "   *** MINIMUM 5 BULLETS PER JOB — ideally 6. Never fewer than 5. ***\n"
-                    + "   Each bullet: 1-2 sentences, start with strong action verb, include % or numbers.\n"
-                    + "   Examples of good bullets:\n"
-                    + "   - \"Architected microservices handling 50K+ RPM using Spring Boot and Kubernetes, reducing latency by 40%.\"\n"
-                    + "   - \"Led migration of legacy monolith to event-driven architecture, cutting deployment time from 2 hours to 15 minutes.\""
+                    ? "Keep company, role, location, period EXACTLY as-is. Keep the same number of bullets.\n"
+                    + "   Reword each bullet to start with a strong action verb and to bring forward what matters for this job. "
+                    + "Keep every number exactly as written and add none. Put the most relevant bullet first."
                     : "Keep exactly as-is.") + "\n\n"
                 + "6. projects: " + (sections.contains("projects")
-                    ? "Keep title, tech, period EXACTLY as-is.\n"
-                    + "   *** MINIMUM 4 BULLETS PER PROJECT. ***\n"
-                    + "   Update tech field to include relevant JD technologies.\n"
-                    + "   Each bullet must include metrics (users, performance, time savings)."
+                    ? "Keep title, tech, period EXACTLY as-is and the same number of bullets. Reword bullets for this job; add no numbers or technologies."
                     : "Keep exactly as-is.") + "\n\n"
                 + "7. education: COPY EXACTLY. Do not change.\n"
                 + "8. certifications: COPY EXACTLY. Do not change.\n\n"
-                + "BEFORE RESPONDING — verify these counts:\n"
-                + "  ✓ Each experience entry has >= 5 bullets\n"
-                + "  ✓ Each project entry has >= 4 bullets\n"
-                + "  ✓ skillCategories has >= 6 categories\n"
-                + "  ✓ Each skill category has >= 5 skills\n"
-                + "  ✓ Summary is >= 80 words\n"
-                + "  If ANY count is too low, ADD MORE before responding.\n\n"
+                + "BEFORE RESPONDING, check: no number, skill, tool or achievement appears that was not in the resume.\n\n"
                 + "OUTPUT: Return ONLY a valid JSON object. No markdown. No backticks. No explanation.\n"
                 + "Start with { and end with }.";
 
@@ -154,6 +139,29 @@ public class ResumeTailorService {
             System.err.println("Tailor failed unexpectedly: " + e.getClass().getSimpleName());
             throw new RuntimeException("Tailoring failed. Please try again.");
         }
+    }
+
+    /**
+     * Turns the text of an uploaded resume (PDF, Word or plain text, read in the browser) into the builder's sections.
+     * Copies, never writes: nothing is added, reworded or invented; anything missing is left empty.
+     */
+    public String importResume(String text) {
+        String sys = "You convert the text of a resume into JSON for a resume builder. Copy the person's words exactly. "
+            + "Do not reword, summarise, improve or invent anything. If something is missing, leave it empty.\n\n"
+            + "Return ONLY this JSON object, no markdown:\n"
+            + "{\"personalInfo\":{\"name\":\"\",\"headline\":\"\",\"email\":\"\",\"phone\":\"\",\"location\":\"\",\"linkedin\":\"\",\"github\":\"\",\"portfolio\":\"\",\"customLinks\":[]},"
+            + "\"summary\":\"\",\"skillCategories\":[{\"name\":\"\",\"skills\":\"comma separated\"}],"
+            + "\"experience\":[{\"company\":\"\",\"role\":\"\",\"location\":\"\",\"period\":\"\",\"bullets\":[\"\"]}],"
+            + "\"projects\":[{\"title\":\"\",\"tech\":\"\",\"period\":\"\",\"bullets\":[\"\"]}],"
+            + "\"education\":[{\"school\":\"\",\"degree\":\"\",\"period\":\"\",\"gpa\":\"\"}],"
+            + "\"certifications\":[\"\"]}\n"
+            + "headline is the person's title line under their name if there is one. Skills keep the resume's own grouping when it has one.";
+        String content = callGemini(sys, "Resume text:\n" + text);
+        if (content == null || content.isBlank()) throw new RuntimeException("The import came back empty. Please try again.");
+        content = cleanJson(content);
+        try { new ObjectMapper().readTree(content); }
+        catch (Exception e) { throw new RuntimeException("The import could not be read. Please try again."); }
+        return content;
     }
 
     // ── Provider resolver ──

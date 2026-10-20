@@ -27,4 +27,14 @@ public class UserResume {
 
     private String accentColor;
     private int fontSize;
+
+    /**
+     * The whole builder as JSON: every section, the template, fonts, colours, section order and custom sections.
+     * The columns above only ever held a few fields, and experience, projects and education were never stored at all,
+     * so nobody could get their resume back (2026-10-20). This is what the page loads.
+     */
+    @Column(columnDefinition = "TEXT")
+    private String data;
+
+    private java.time.Instant updatedAt;
 }

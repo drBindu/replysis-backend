@@ -118,6 +118,29 @@ public class ResumeController {
         }
     }
 
+    // ─── 1b. Import an existing resume ─────────────────────────────────────────
+    // Free: it is how someone starts. Rate limited like every AI call.
+    @PostMapping("/import")
+    public ResponseEntity<?> importResume(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            HttpServletRequest request,
+            @RequestBody Map<String, Object> payload) {
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Authentication required"));
+        if (!allowAiRequest(user, request, "resume-import"))
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "Too many requests. Please try again shortly."));
+        String text = boundedText(payload.get("text"), 30_000);
+        if (text == null || text.isBlank() || text.trim().length() < 40)
+            return ResponseEntity.badRequest().body(Map.of("error", "We could not find any text in that file."));
+        try {
+            return ResponseEntity.ok().contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(tailorService.importResume(text));
+        } catch (Exception e) {
+            System.err.println("Resume import failed: " + e.getClass().getSimpleName());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "We could not read that resume. Please try again."));
+        }
+    }
+
     // ─── 2. AI Tailor ──────────────────────────────────────────────────────────
     @PostMapping("/tailor")
     public ResponseEntity<?> tailorResume(
@@ -200,16 +223,55 @@ public class ResumeController {
 
         try {
             System.out.println("=== SAVING RESUME uid=" + user.uid() + " ===");
-            // Always stamp the authenticated user's UID — never trust client-supplied userId
-            resume.setUserId(user.uid());
-            UserResume saved = resumeRepository.save(resume);
-            return ResponseEntity.ok(saved);
+            if (resume.getData() != null && resume.getData().length() > MAX_RESUME_JSON)
+                return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(Map.of("error", "This resume is too large to save."));
+            // One resume per person, updated in place. Every save used to add a new row, and none was ever read back.
+            UserResume row = resumeRepository.findFirstByUserIdOrderByIdDesc(user.uid()).orElseGet(UserResume::new);
+            row.setUserId(user.uid());   // always the signed-in person, never a client-supplied id
+            row.setFullName(cut255(resume.getFullName()));
+            row.setHeadline(cut255(resume.getHeadline()));
+            row.setEmail(cut255(resume.getEmail()));
+            row.setPhone(cut255(resume.getPhone()));
+            row.setSummary(resume.getSummary());
+            row.setSkillCategories(resume.getSkillCategories());
+            row.setAccentColor(cut255(resume.getAccentColor()));
+            row.setFontSize(resume.getFontSize());
+            row.setData(resume.getData());
+            row.setUpdatedAt(java.time.Instant.now());
+            UserResume saved = resumeRepository.save(row);
+            return ResponseEntity.ok(Map.of("id", saved.getId(), "updatedAt", saved.getUpdatedAt().toString()));
         } catch (Exception e) {
             String ref = correlationId();
             System.err.println("Resume save failed ref=" + ref + " type=" + e.getClass().getSimpleName());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", "We could not save your resume just now. Please try again.",
                                  "ref", ref));
+        }
+    }
+
+    /** These columns are 255 characters; a long AI headline used to fail the whole save. The full text is in data. */
+    private static String cut255(String v) { return v == null || v.length() <= 255 ? v : v.substring(0, 255); }
+
+    /** Larger than any real resume; stops a client storing megabytes in the table. */
+    private static final int MAX_RESUME_JSON = 400_000;
+
+    // ─── 3b. The signed-in person's resume, for the page to open with ─────────
+    @GetMapping("/mine")
+    public ResponseEntity<?> myResume(@RequestHeader(value = "Authorization", required = false) String authHeader) {
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Authentication required"));
+        try {
+            Optional<UserResume> row = resumeRepository.findFirstByUserIdOrderByIdDesc(user.uid());
+            if (row.isEmpty() || row.get().getData() == null) return ResponseEntity.noContent().build();
+            return ResponseEntity.ok(Map.of(
+                    "data", row.get().getData(),
+                    "updatedAt", row.get().getUpdatedAt() == null ? "" : row.get().getUpdatedAt().toString()));
+        } catch (Exception e) {
+            String ref = correlationId();
+            System.err.println("Resume read failed ref=" + ref + " type=" + e.getClass().getSimpleName());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "We could not load your resume just now. Please try again.", "ref", ref));
         }
     }
 
