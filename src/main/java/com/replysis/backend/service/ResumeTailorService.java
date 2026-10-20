@@ -117,7 +117,7 @@ public class ResumeTailorService {
                     + "number already in the resume (keep every number exactly). Never invent new numbers, percentages or metrics.\n\n"
                     + "RULES:\n"
                     + "1. personalInfo: copy exactly, except headline.\n"
-                    + "2. headline: the job post's own job title, then 2 to 4 of its most important skills.\n"
+                    + "2. headline: the job post's own job title, then 2 or 3 of its most important skills, separated by \" | \". At most 10 words. No dashes.\n"
                     + "3. summary: 3 to 5 sentences written for this job, using the job post's language and its key requirements, "
                     + "connected to what the person has done.\n"
                     + "4. skillCategories: every skill, tool and method the job post names, plus the resume's own relevant skills, "
