@@ -20,7 +20,11 @@ public class ResumeTailorService {
     // would have failed every tailor request rather than degrading. Verified
     // against the live endpoint on 2026-09-11, both the old name failing and
     // this one answering.
-    private final String GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
+    private final String GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models/";
+    // Tailoring rewrites a whole resume for a job and costs the user 4 answers, so it gets the stronger model
+    // (owner, 2026-10-20: Lite only touched up wording, even for a very different role). Lite stays as the backup.
+    private final String TAILOR_MODEL = "gemini-3.5-flash";
+    private final String LITE_MODEL   = "gemini-3.5-flash-lite";
 
     // ── Public entry points ──
 
@@ -68,11 +72,15 @@ public class ResumeTailorService {
                 + "percentage, achievement, tool or skill that is not in the resume. If a bullet has no number, do not add one.\n\n"
                 + "RULES — follow EVERY rule precisely:\n\n"
                 + "1. personalInfo: COPY EXACTLY. Never change name, email, phone, location, linkedin, github, portfolio, or customLinks.\n\n"
-                + "2. headline: Lead with the role or focus the job post asks for (its job title, or its area such as AI and ML), "
-                + "then 3-5 of the person's own skills that match the job, most relevant first. Only skills the resume shows.\n"
-                + "   Example for an AI and ML post: \"Software Engineer, AI and ML | Python | TensorFlow | AWS\"\n\n"
+                + "2. headline: ALWAYS rewrite it for this job. Start with the job's title as the post names it; if the post names no clear "
+                + "title, name its focus in 2 to 5 words (for example \"AI Training and Enablement\"). Then 2 to 4 of the person's own "
+                + "strengths or skills that match the job, most relevant first.\n"
+                + "   Examples: \"Software Engineer, AI and ML | Python | AWS\", \"AI Training and Enablement | Mentoring | Full Stack Engineering\"\n\n"
                 + "3. summary: " + (sections.contains("summary")
-                    ? "Rewrite as 3-5 sentences aimed at the job post's role, using only facts from the resume. Mention the job post's technologies only where the resume shows them."
+                    ? "Rewrite as 3-5 sentences for THIS role. The first sentence positions the person for the job using the job post's own words, "
+                    + "built from the resume's most relevant real experience. If the job is not a pure engineering role (training, consulting, "
+                    + "product, leadership), lead with the transferable parts the resume really shows, such as mentoring, knowledge sharing, "
+                    + "working with product and business teams, and measurable results. Never claim experience the resume does not show."
                     : "Keep exactly as-is.") + "\n\n"
                 + "4. skillCategories: " + (sections.contains("skills")
                     ? "Regroup the resume's own skills into clear categories (for example Languages, Frameworks, Cloud, Databases, Tools). "
@@ -80,14 +88,17 @@ public class ResumeTailorService {
                     : skillsInstr) + "\n\n"
                 + "5. experience: " + (sections.contains("experience")
                     ? "Keep company, role, location, period EXACTLY as-is. Keep the same number of bullets.\n"
-                    + "   Reword each bullet to start with a strong action verb and to bring forward what matters for this job. "
-                    + "Keep every number exactly as written and add none. Put the most relevant bullet first."
+                    + "   Reword each bullet to start with a strong action verb and to bring forward what this job values most "
+                    + "(for a training or client role: teaching, mentoring, communication, stakeholders, business outcomes). "
+                    + "Keep every number exactly as written and add none. Order bullets so the most relevant come first."
                     : "Keep exactly as-is.") + "\n\n"
                 + "6. projects: " + (sections.contains("projects")
                     ? "Keep title, tech, period EXACTLY as-is and the same number of bullets. Reword bullets for this job; add no numbers or technologies."
                     : "Keep exactly as-is.") + "\n\n"
                 + "7. education: COPY EXACTLY. Do not change.\n"
                 + "8. certifications: COPY EXACTLY. Do not change.\n\n"
+                + "9. fit: add a top level field \"fit\" = {\"strengths\": [up to 4 short phrases: what in this resume matches the job], "
+                + "\"gaps\": [up to 4 short phrases: what the job asks for that this resume does not show]}. Plain words, no dashes.\n\n"
                 + "BEFORE RESPONDING, check: no number, skill, tool or achievement appears that was not in the resume.\n\n"
                 + "OUTPUT: Return ONLY a valid JSON object. No markdown. No backticks. No explanation.\n"
                 + "Start with { and end with }.";
@@ -97,7 +108,13 @@ public class ResumeTailorService {
             String content = null;
 
             System.out.println("Calling Gemini...");
-            content = callGemini(sys, user);
+            try {
+                content = callGemini(sys, user, TAILOR_MODEL);
+            } catch (RuntimeException strongFailed) {
+                System.err.println("Tailor model failed (" + strongFailed.getClass().getSimpleName() + "), using the backup model");
+                content = null;
+            }
+            if (content == null || content.isBlank()) content = callGemini(sys, user, LITE_MODEL);
 
             if (content == null || content.isBlank()) {
                 throw new RuntimeException("AI provider returned empty response. Try again in 30 seconds.");
@@ -157,7 +174,7 @@ public class ResumeTailorService {
             + "\"education\":[{\"school\":\"\",\"degree\":\"\",\"period\":\"\",\"gpa\":\"\"}],"
             + "\"certifications\":[\"\"]}\n"
             + "headline is the person's title line under their name if there is one. Skills keep the resume's own grouping when it has one.";
-        String content = callGemini(sys, "Resume text:\n" + text);
+        String content = callGemini(sys, "Resume text:\n" + text, LITE_MODEL);
         if (content == null || content.isBlank()) throw new RuntimeException("The import came back empty. Please try again.");
         content = cleanJson(content);
         try { new ObjectMapper().readTree(content); }
@@ -181,19 +198,21 @@ public class ResumeTailorService {
 
     // ── Gemini call ──
 
-    private String callGemini(String sys, String user) {
+    private String callGemini(String sys, String user, String model) {
         try {
             String combined = sys + "\n\n" + user;
             Map<String, Object> part = Map.of("text", combined);
             Map<String, Object> contentObj = Map.of("parts", List.of(part));
-            Map<String, Object> body = Map.of("contents", List.of(contentObj));
+            // JSON mode: the answer is always a JSON object, so it cannot come back wrapped in prose or markdown.
+            Map<String, Object> body = Map.of("contents", List.of(contentObj),
+                "generationConfig", Map.of("responseMimeType", "application/json"));
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
 
             RestTemplate rt = restTemplate();
             ResponseEntity<Map> res = rt.postForEntity(
-                GEMINI_URL + "?key=" + geminiApiKey, new HttpEntity<>(body, headers), Map.class);
+                GEMINI_BASE + model + ":generateContent?key=" + geminiApiKey, new HttpEntity<>(body, headers), Map.class);
             if (res.getBody() == null) return null;
 
             List<Map<String, Object>> candidates = (List<Map<String, Object>>) res.getBody().get("candidates");
@@ -203,7 +222,10 @@ public class ResumeTailorService {
             List<Map<String, Object>> parts = (List<Map<String, Object>>) contentMap.get("parts");
             if (parts == null || parts.isEmpty()) return null;
 
-            String content = (String) parts.get(0).get("text");
+            // Skip any thinking parts; join the answer parts.
+            StringBuilder sb = new StringBuilder();
+            for (Map<String, Object> p : parts) if (!Boolean.TRUE.equals(p.get("thought")) && p.get("text") != null) sb.append(p.get("text"));
+            String content = sb.toString();
             System.out.println("GEMINI content length: " + (content != null ? content.length() : 0));
             return content;
         } catch (org.springframework.web.client.HttpClientErrorException e) {
@@ -217,7 +239,7 @@ public class ResumeTailorService {
     private RestTemplate restTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10_000);
-        factory.setReadTimeout(45_000);
+        factory.setReadTimeout(90_000);
         return new RestTemplate(factory);
     }
 
