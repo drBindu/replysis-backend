@@ -14,6 +14,10 @@ public class ResumeTailorService {
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
+    // gpt-oss-120b on Cerebras: the paid model behind live answers, second choice for tailoring.
+    @Value("${cerebras.api.key:}")
+    private String cerebrasApiKey;
+
     // gemini-2.0-flash was RETIRED and answered 404 on every call - "This model
     // models/gemini-2.0-flash is no longer available". It was the fallback
     // behind Groq, so it had almost certainly never run: pulling the Groq key
@@ -113,6 +117,13 @@ public class ResumeTailorService {
             } catch (RuntimeException strongFailed) {
                 System.err.println("Tailor model failed (" + strongFailed.getClass().getSimpleName() + "), using the backup model");
                 content = null;
+            }
+            if ((content == null || content.isBlank()) && cerebrasApiKey != null && !cerebrasApiKey.isBlank()) {
+                try { content = callCerebras(sys, user); }
+                catch (RuntimeException cerebrasFailed) {
+                    System.err.println("Cerebras tailor failed (" + cerebrasFailed.getClass().getSimpleName() + "), using Lite");
+                    content = null;
+                }
             }
             if (content == null || content.isBlank()) content = callGemini(sys, user, LITE_MODEL);
 
@@ -232,6 +243,27 @@ public class ResumeTailorService {
             System.err.println("GEMINI HTTP ERROR: " + e.getStatusCode());
             throw e;
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private String callCerebras(String sys, String user) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("model", "gpt-oss-120b");
+        body.put("messages", List.of(Map.of("role", "system", "content", sys), Map.of("role", "user", "content", user)));
+        body.put("temperature", 0.3);
+        body.put("max_tokens", 8000);
+        body.put("reasoning_effort", "low");
+        body.put("response_format", Map.of("type", "json_object"));
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(cerebrasApiKey);
+        ResponseEntity<Map> res = restTemplate().postForEntity("https://api.cerebras.ai/v1/chat/completions", new HttpEntity<>(body, headers), Map.class);
+        if (res.getBody() == null) return null;
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) res.getBody().get("choices");
+        if (choices == null || choices.isEmpty()) return null;
+        Object text = ((Map<String, Object>) choices.get(0).get("message")).get("content");
+        System.out.println("CEREBRAS content length: " + (text instanceof String t ? t.length() : 0));
+        return text instanceof String t ? t : null;
     }
 
     // ── Build slim resume — keeps up to 4 bullets per item (was 2, now 4) ──
