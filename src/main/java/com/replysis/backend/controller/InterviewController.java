@@ -244,8 +244,14 @@ public class InterviewController {
         FirestoreCreditsService.UserCredits credits = identity.isGuest()
                 ? creditsService.getGuestCredits(identity.deviceId())
                 : creditsService.getCredits(identity.uid());
+        // Windows 1.0.40 and 1.0.41 refuse to ask once "credits" is under one answer, without looking at bought minutes.
+        // A customer bought 45 minutes and the app kept saying "You have 0 answers left" (2026-10-21). While minutes
+        // remain, live answers are paid from minutes (minutesCover), so the app is told it may ask. The real balance is
+        // in "creditsReal"; nothing is charged twice, and mock interviews and resume tools still check the real credits.
+        int reported = (!identity.isGuest() && credits.minutesBalance > 0) ? Math.max(credits.credits, 50) : credits.credits;
         return ResponseEntity.ok(Map.of(
-                "credits",        credits.credits,
+                "credits",        reported,
+                "creditsReal",    credits.credits,
                 "plan",           credits.plan,
                 "isUnlimited",    credits.isUnlimited,
                 "minutesBalance", credits.minutesBalance
