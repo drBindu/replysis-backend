@@ -134,6 +134,29 @@ public class AlertService {
         }
     }
 
+    /**
+     * News rather than trouble (a new signup): sent once per key, ever, by whichever instance claims it first. Not subject to
+     * the half hour cooldown, but still inside the hourly cap.
+     */
+    public void notice(String key, String subject, String body) {
+        long now = clock.getAsLong();
+        run(() -> {
+            if (!claimOnce(key, now)) return;
+            deliver("notice", key, subject, body, now);
+        });
+    }
+
+    private boolean claimOnce(String key, long now) {
+        if (!firebaseEnabled) return true;
+        try {
+            FirestoreClient.getFirestore().collection("_alerts").document(key)
+                    .create(Map.of("sentAt", now)).get(8, TimeUnit.SECONDS);
+            return true;
+        } catch (Exception e) {
+            return false;   // already claimed (or the database refused): never send a notice twice
+        }
+    }
+
     /** Sends one message now, to show the owner it works. Ignores the cooldown. Says what happened. */
     public Map<String, Object> sendTest() {
         long now = clock.getAsLong();
