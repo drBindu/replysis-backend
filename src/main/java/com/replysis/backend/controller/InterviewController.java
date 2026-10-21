@@ -1238,10 +1238,15 @@ public class InterviewController {
                 // No answer was delivered, or the screen held nothing to answer: return the up-front charge.
                 if (nothingAsked[0]) System.out.println("[SCREEN] Nothing on the screen to answer; not charged.");
                 if (!providerAccepted || !answerDelivered || nothingAsked[0]) {
+                    // Labelled apart from a real failure: the admin counted "nothing to answer" as a failed answer
+                    // (2026-10-21). Same event id, so it still replaces the charge row.
+                    com.replysis.backend.service.UsageEventService.Context refundUsage = nothingAsked[0] && providerAccepted && answerDelivered
+                            ? new com.replysis.backend.service.UsageEventService.Context("screen_nothing", screenUsage.provider(), screenUsage.model(), screenUsage.eventId())
+                            : screenUsage;
                     if (identity.isGuest()) creditsService.refundGuestCredits(
-                            identity.deviceId(), ANSWER_COST, screenUsage);
+                            identity.deviceId(), ANSWER_COST, refundUsage);
                     else                    creditsService.refundCredits(
-                            identity.uid(), ANSWER_COST, screenUsage);
+                            identity.uid(), ANSWER_COST, refundUsage);
                 }
             }
         };
