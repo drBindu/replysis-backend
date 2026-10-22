@@ -53,6 +53,8 @@ public class AlertService {
     @Value("${alerts.to:${ADMIN_EMAIL:}}") private String to;
     @Value("${alerts.from:Replysis alerts <onboarding@resend.dev>}") private String from;
     @Value("${alerts.resend.key:}") private String resendKey;
+    // Mail to customers (welcome) comes from the product's own address, which needs replysis.com verified in Resend.
+    @Value("${mail.from:Replysis <hello@replysis.com>}") private String userFrom;
 
     /** How a finished message leaves. Replaced in tests. Returns true when it was handed to the mail service. */
     interface Sender { boolean send(String to, String subject, String body); }
@@ -155,6 +157,20 @@ public class AlertService {
         } catch (Exception e) {
             return false;   // already claimed (or the database refused): never send a notice twice
         }
+    }
+
+    /**
+     * A message to a customer (the welcome email), sent once per key across both instances. Does nothing until an email key
+     * is set, and claims the key only when it can actually send, so nobody is marked "welcomed" by a server that could not.
+     */
+    public void toUserOnce(String key, String recipient, String subject, String body) {
+        if (resendKey == null || resendKey.isBlank() || recipient == null || !recipient.contains("@")) return;
+        long now = clock.getAsLong();
+        run(() -> {
+            if (!claimOnce(key, now)) return;
+            boolean sent = sendByResend(userFrom, recipient, subject, body);
+            System.out.println("[MAIL] " + key + " to " + mask(recipient) + (sent ? " sent" : " failed"));
+        });
     }
 
     /** Sends one message now, to show the owner it works. Ignores the cooldown. Says what happened. */
@@ -268,9 +284,13 @@ public class AlertService {
     }
 
     private boolean sendByResend(String recipient, String subject, String body) {
+        return sendByResend(from, recipient, subject, body);
+    }
+
+    private boolean sendByResend(String sender, String recipient, String subject, String body) {
         try {
             String payload = json.writeValueAsString(Map.of(
-                    "from", from, "to", List.of(recipient), "subject", subject, "text", body));
+                    "from", sender, "to", List.of(recipient), "subject", subject, "text", body));
             var request = HttpRequest.newBuilder(URI.create("https://api.resend.com/emails"))
                     .timeout(Duration.ofSeconds(10))
                     .header("Authorization", "Bearer " + resendKey)

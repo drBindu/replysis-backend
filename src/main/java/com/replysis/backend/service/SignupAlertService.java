@@ -26,6 +26,21 @@ public class SignupAlertService {
     private static final DateTimeFormatter WHEN =
             DateTimeFormatter.ofPattern("d MMM, h:mm a").withZone(ZoneId.of("America/Chicago"));
 
+    /** Plain words, no dashes or dots as decoration (the owner reads those as machine written). */
+    static String welcome(String firstName) {
+        return "Hi" + firstName + ",\n\n"
+                + "Thanks for joining Replysis.\n\n"
+                + "Here is how to get your first answer in two minutes:\n\n"
+                + "1. Download the app from https://replysis.com (Windows or Mac)\n"
+                + "2. Open it, sign in, and press Start\n"
+                + "3. Ask a practice question out loud. The answer starts in under a second.\n\n"
+                + "Your first 5 answers are free.\n\n"
+                + "Invite a friend and you both get 5 more free answers. Your invite link is in the app menu, "
+                + "or at https://replysis.com/account\n\n"
+                + "Good luck with your interviews,\n"
+                + "The Replysis team\n";
+    }
+
     @Scheduled(initialDelay = 30_000, fixedDelay = 60_000)
     public void look() {
         if (!firebaseEnabled) return;
@@ -45,6 +60,8 @@ public class SignupAlertService {
                                 + (name == null || name.isBlank() ? "" : "\nName: " + name)
                                 + "\nSigned up: " + when + " (US Central)"
                                 + "\n\nSee what they do: https://replysis.com/admin");
+                String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\\s+")[0];
+                alerts.toUserOnce("welcome-" + doc.getId(), email, "Welcome to Replysis", welcome(first));
             }
         } catch (Exception e) {
             System.err.println("[SIGNUP_ALERT] look failed: " + e.getClass().getSimpleName());
