@@ -143,6 +143,9 @@ public class AlertService {
     public void notice(String key, String subject, String body) {
         long now = clock.getAsLong();
         run(() -> {
+            // Never mark a notice sent when nothing can send it: four signups were "claimed" before the email key existed
+            // and so never emailed (2026-10-22).
+            if (!isConfigured()) { record(now, "notice", key, subject, false); return; }
             if (!claimOnce(key, now)) return;
             deliver("notice", key, subject, body, now);
         });
