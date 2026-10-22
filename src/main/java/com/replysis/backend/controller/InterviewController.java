@@ -1157,7 +1157,21 @@ public class InterviewController {
 
                 List<Map<String, Object>> messages = buildVisionMessages(finalImages, finalPrompt);
 
-                HttpResponse<java.io.InputStream> response = callVisionProvider(endpoint, apiKey, model, messages);
+                // Raced like a spoken answer: a vision call that stalls used to hold the person for up to 60 s before the
+                // backup was even tried (review, 2026-10-22). Normal replies take 1.3 to 3.6 s, so the backup is asked
+                // only after 5 s of silence, and whichever answers well first is used.
+                final List<Map<String, Object>> firstMessages = messages;
+                final boolean visionHedgeable = fallbackApiKey != null && !fallbackApiKey.isBlank();
+                HttpResponse<java.io.InputStream> response = com.replysis.backend.service.HedgedCall.race(
+                        () -> callVisionProvider(endpoint, apiKey, model, firstMessages),
+                        visionHedgeable ? () -> {
+                            System.out.println("[HEDGE] vision " + model + " silent for 5000 ms; also asking " + fallbackModel);
+                            return callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, firstMessages);
+                        } : null,
+                        5_000L,
+                        r -> r.statusCode() == 200,
+                        r -> { try { r.body().close(); } catch (Exception ignored) { /* already closed */ } },
+                        com.replysis.backend.service.HedgedCall.pool());
 
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
