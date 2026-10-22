@@ -249,12 +249,16 @@ public class InterviewController {
         // remain, live answers are paid from minutes (minutesCover), so the app is told it may ask. The real balance is
         // in "creditsReal"; nothing is charged twice, and mock interviews and resume tools still check the real credits.
         int reported = (!identity.isGuest() && credits.minutesBalance > 0) ? Math.max(credits.credits, 50) : credits.credits;
+        // A paid plan with answers left shows answers, not minutes: the app's badge said "1 min left" to a Pro customer
+        // holding 500 answers (2026-10-22). Display only; the minutes stay on the account and are still spent first.
+        boolean planCovers = credits.isUnlimited || (!"free".equalsIgnoreCase(credits.plan) && credits.credits >= 20);
+        int minutesShown = planCovers ? 0 : credits.minutesBalance;
         return ResponseEntity.ok(Map.of(
                 "credits",        reported,
                 "creditsReal",    credits.credits,
                 "plan",           credits.plan,
                 "isUnlimited",    credits.isUnlimited,
-                "minutesBalance", credits.minutesBalance
+                "minutesBalance", minutesShown
         ));
     }
 
