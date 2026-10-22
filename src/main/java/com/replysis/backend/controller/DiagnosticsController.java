@@ -64,6 +64,8 @@ public class DiagnosticsController {
         // The app's own setup lines for a problem (devices found, Windows' error text), joined with " | ". Stored for
         // the admin portal, not written to the server log, which stays one short line per report.
         String detail = clean(body.get("detail"), 6000);
+        // The signed-in email the app sends, so admin can tell whose problem it is. Diagnostic only: never used for access.
+        String user = clean(body.get("user"), 120);
 
         System.out.println("[CLIENT_ERROR] "
                 + "v=" + version
@@ -72,7 +74,7 @@ public class DiagnosticsController {
                 + " type=" + type
                 + " msg=\"" + message + "\""
                 + " frames=\"" + frames + "\"");
-        record(version, os, source, type, message, frames, detail);
+        record(version, os, source, type, message, frames, detail, user);
         if (alerts != null) {
             alerts.noteFailure("app-errors", 5, 10 * 60_000L, "Replysis: apps are reporting errors",
                     "Desktop apps are reporting errors on customers' computers.\n\nThe latest: version " + version + ", " + type
@@ -94,7 +96,7 @@ public class DiagnosticsController {
             },
             new ThreadPoolExecutor.DiscardPolicy());
 
-    private void record(String version, String os, String source, String type, String message, String frames, String detail) {
+    private void record(String version, String os, String source, String type, String message, String frames, String detail, String user) {
         try {
             writer.execute(() -> {
                 try {
@@ -107,6 +109,7 @@ public class DiagnosticsController {
                     doc.put("message", message);
                     doc.put("frames", frames);
                     if (!detail.isEmpty()) doc.put("detail", detail);
+                    if (!user.isEmpty()) doc.put("user", user);
                     FirestoreClient.getFirestore().collection("client_errors").add(doc);
                 } catch (Exception ignored) {
                     // Not worth a failed request, and nothing to retry: the report is also in the server log.
