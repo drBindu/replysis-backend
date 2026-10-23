@@ -187,11 +187,29 @@ public class ReadinessService {
      * a miss on the main model alone is not an outage: it is asked again of the backup, and only when both fail is the answer path
      * down. Without this a thirty second wobble at one provider turned the panel red, and would have sent an email.
      */
+    /**
+     * The main model is given PROBE_TIMEOUT_MS, not its own 60 s request limit: on 2026-10-22 it hung for 60 s, this check gave up
+     * at 18 s without ever asking the backup, and "Answers is down" was emailed while every real answer was covered by the backup
+     * (real answers ask it after 0.9 s of silence). The main call keeps running on its own thread and is simply not waited for.
+     */
     private Probe answerPath() {
-        Probe main = fromMillis(interview.warmAnswerModel());
+        CompletableFuture<Long> call = CompletableFuture.supplyAsync(interview::warmAnswerModel, mainAnswerProbe);
+        Probe main;
+        try {
+            main = fromMillis(call.get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        } catch (Exception e) {
+            main = new Probe(false, PROBE_TIMEOUT_MS, "no answer in " + PROBE_TIMEOUT_MS / 1000 + " s", System.currentTimeMillis());
+        }
         if (main.ok()) return main;
         return coverByBackup(main, interview.warmAnswerBackup(), System.currentTimeMillis());
     }
+
+    /** Its own threads, so a main model call left hanging never takes a slot from the other checks. */
+    private final ExecutorService mainAnswerProbe = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "readiness-answer");
+        t.setDaemon(true);
+        return t;
+    });
 
     /** The main model missed. If the backup answered, say so and show it as slow (covered, but not as good as it should be). */
     static Probe coverByBackup(Probe main, long backupMs, long now) {
