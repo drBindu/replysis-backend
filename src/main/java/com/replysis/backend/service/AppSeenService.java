@@ -100,7 +100,7 @@ public class AppSeenService {
         if (info != null) presenceListening.put(key, listening);
 
         try {
-            writer.execute(() -> writePresence(uid, presenceFields(info, listening)));
+            writer.execute(() -> writePing(uid, info, listening));
         } catch (Exception ignored) {
             // The queue is closed or full; the next ping tries again.
         }
@@ -147,6 +147,46 @@ public class AppSeenService {
             fields.put("appListening", false);
         }
         return fields;
+    }
+
+    /**
+     * A ping, plus when this surface was opened (appOpenedAt, webOpenedAt) so admin can say "opened 11:00 PM, open 2 h"
+     * (owner, 2026-10-23). It counts as a new opening when the surface was closed on purpose since its last ping, or has
+     * not pinged for OPENED_GAP_MS. Read from the document, not this server's memory, so a deploy does not restart the clock.
+     */
+    private void writePing(String uid, AppInfo info, boolean listening) {
+        String at = info == null ? "lastWebAt" : "lastAppAt";
+        String left = info == null ? "lastWebLeftAt" : "lastAppLeftAt";
+        String opened = info == null ? "webOpenedAt" : "appOpenedAt";
+        try {
+            var db = FirestoreClient.getFirestore();
+            var ref = db.collection("users").document(uid);
+            db.runTransaction(tx -> {
+                var snap = tx.get(ref).get();
+                if (!snap.exists()) return null;
+                Map<String, Object> fields = presenceFields(info, listening);
+                if (isNewOpening(millis(snap.get(at)), millis(snap.get(left)), millis(snap.get(opened)), System.currentTimeMillis()))
+                    fields.put(opened, FieldValue.serverTimestamp());
+                tx.update(ref, fields);
+                return null;
+            }).get(8, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+            // The database was slow. The next ping tries again.
+        }
+    }
+
+    /** More than this without a ping and the next ping is a new opening (pings come every minute; a closed laptop says nothing). */
+    static final long OPENED_GAP_MS = 3 * 60_000L;
+
+    static boolean isNewOpening(long lastPing, long leftAt, long openedAt, long now) {
+        if (openedAt <= 0 || lastPing <= 0) return true;
+        if (leftAt > 0 && leftAt >= lastPing) return true;
+        return now - lastPing > OPENED_GAP_MS;
+    }
+
+    private static long millis(Object v) {
+        if (v instanceof com.google.cloud.Timestamp t) return t.toDate().getTime();
+        return 0;
     }
 
     private void writePresence(String uid, Map<String, Object> fields) {
