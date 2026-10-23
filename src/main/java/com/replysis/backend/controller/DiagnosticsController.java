@@ -65,7 +65,9 @@ public class DiagnosticsController {
         // the admin portal, not written to the server log, which stays one short line per report.
         String detail = clean(body.get("detail"), 6000);
         // The signed-in email the app sends, so admin can tell whose problem it is. Diagnostic only: never used for access.
-        String user = clean(body.get("user"), 120);
+        // Not through clean(): it blanks every email, so admin saw "<email>" instead of whose problem it was (2026-10-23).
+        // Only something shaped like one address is kept.
+        String user = body.get("user") instanceof String u && u.length() <= 120 && u.matches("[^\\s@<>\"]+@[^\\s@<>\"]+\\.[^\\s@<>\"]+") ? u.trim() : "";
 
         System.out.println("[CLIENT_ERROR] "
                 + "v=" + version
