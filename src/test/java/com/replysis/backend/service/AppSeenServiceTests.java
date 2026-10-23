@@ -57,4 +57,13 @@ class AppSeenServiceTests {
         assertTrue(web.containsKey("lastWebLeftAt"));
         assertFalse(web.containsKey("lastAppLeftAt"));
     }
+
+    @Test
+    void anOpeningStartsAfterACloseOrAGapButNotBetweenPings() {
+        long now = 10_000_000L;
+        assertTrue(AppSeenService.isNewOpening(0, 0, 0, now), "never seen");
+        assertFalse(AppSeenService.isNewOpening(now - 60_000, 0, now - 3_600_000, now), "pinged a minute ago");
+        assertTrue(AppSeenService.isNewOpening(now - 60_000, now - 30_000, now - 3_600_000, now), "closed since the last ping");
+        assertTrue(AppSeenService.isNewOpening(now - 10 * 60_000, 0, now - 3_600_000, now), "laptop was asleep");
+    }
 }
