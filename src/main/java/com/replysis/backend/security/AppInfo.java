@@ -7,7 +7,7 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import java.util.regex.Pattern;
 
 /**
- * Which Replysis app made a request: its platform ("windows" or "mac") and its version.
+ * Which Replysis app made a request: its platform ("windows", "mac", "android" or "ios") and its version.
  *
  * The desktop apps send these on every call to our own server (X-App-Platform and X-App-Version). They are only labels for the
  * admin page and the usage log. Nothing is decided from them: anybody can send any value, so they never grant, charge or limit.
@@ -24,6 +24,9 @@ public record AppInfo(String platform, String version) {
         String platform = switch (p) {
             case "windows", "win", "win32" -> "windows";
             case "mac", "macos", "osx", "darwin" -> "mac";
+            // The phone app (2026-10-24).
+            case "android" -> "android";
+            case "ios", "iphone", "ipad" -> "ios";
             default -> null;
         };
         if (platform == null) return null;

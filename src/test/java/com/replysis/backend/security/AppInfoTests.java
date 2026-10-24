@@ -40,6 +40,13 @@ class AppInfoTests {
     }
 
     @Test
+    void thePhoneAppIsLabelledByItsPlatform() {
+        assertEquals("android", AppInfo.parse("android", "1.0.0").platform());
+        assertEquals("ios", AppInfo.parse("ios", "1.0.0").platform());
+        assertEquals("ios", AppInfo.parse("iPhone", "1.0.0").platform());
+    }
+
+    @Test
     void outsideARequestThereIsNoApp() {
         assertNull(AppInfo.current());
     }
