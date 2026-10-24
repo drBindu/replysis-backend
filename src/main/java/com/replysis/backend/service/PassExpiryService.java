@@ -32,6 +32,11 @@ public class PassExpiryService {
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMMM").withZone(ZoneId.of("Asia/Kolkata"));
 
+    /** Plans that end at passExpiresAt: an India month paid once, or the 3 day trial every new account starts on. */
+    static boolean timed(String planSource) {
+        return "pass".equals(planSource) || "trial".equals(planSource);
+    }
+
     @Scheduled(initialDelay = 60_000, fixedDelay = 600_000)
     public void run() {
         if (!firebaseEnabled) return;
@@ -43,16 +48,17 @@ public class PassExpiryService {
             var ended = db.collection("users").whereLessThanOrEqualTo("passExpiresAt", now.toString())
                     .limit(100).get().get(15, TimeUnit.SECONDS);
             for (QueryDocumentSnapshot doc : ended.getDocuments()) {
-                if (!"pass".equals(doc.getString("planSource"))) continue;
+                if (!timed(doc.getString("planSource"))) continue;
                 var ref = doc.getReference();
                 db.runTransaction(tx -> {
                     var snap = tx.get(ref).get();
                     String end = snap.getString("passExpiresAt");
-                    if (!"pass".equals(snap.getString("planSource")) || end == null || end.compareTo(Instant.now().toString()) > 0) return null;
+                    String source = snap.getString("planSource");
+                    if (!timed(source) || end == null || end.compareTo(Instant.now().toString()) > 0) return null;
                     Long purchased = snap.getLong("purchasedCredits");
                     Map<String, Object> u = new HashMap<>();
                     u.put("plan", "free");
-                    u.put("planSource", "pass-ended");
+                    u.put("planSource", source + "-ended");
                     u.put("credits", purchased == null ? 0 : Math.max(0, purchased));
                     u.put("audioMinutesAllowance", FieldValue.delete());
                     u.put("creditsResetDate", LocalDate.now(ZoneId.of("UTC")).withDayOfMonth(1).plusMonths(1)
@@ -62,7 +68,28 @@ public class PassExpiryService {
                     tx.update(ref, u);
                     return null;
                 }).get(15, TimeUnit.SECONDS);
-                System.out.println("[PASS] ended, back to free: " + doc.getId());
+                System.out.println("[PASS] " + doc.getString("planSource") + " ended, back to free: " + doc.getId());
+            }
+
+            // A trial with under a day left: one reminder, with how to keep going.
+            var trialSoon = db.collection("users")
+                    .whereGreaterThan("passExpiresAt", now.toString())
+                    .whereLessThanOrEqualTo("passExpiresAt", now.plus(1, ChronoUnit.DAYS).toString())
+                    .limit(100).get().get(15, TimeUnit.SECONDS);
+            for (QueryDocumentSnapshot doc : trialSoon.getDocuments()) {
+                if (!"trial".equals(doc.getString("planSource"))) continue;
+                String email = doc.getString("email");
+                String end = doc.getString("passExpiresAt");
+                if (email == null || end == null) continue;
+                String name = doc.getString("displayName");
+                String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\s+")[0];
+                alerts.toUserOnce("trial-reminder-" + doc.getId(), email,
+                        "Your Replysis trial ends tomorrow",
+                        "Hi" + first + ",\n\n"
+                                + "Your free Replysis Pro trial ends on " + DAY.format(Instant.parse(end)) + ".\n\n"
+                                + "To keep live answers for your interviews, choose a plan here:\n"
+                                + "https://replysis.com/pricing\n\n"
+                                + "Good luck with your interviews,\nThe Replysis team\n");
             }
 
             // About three days left: one reminder per pass.

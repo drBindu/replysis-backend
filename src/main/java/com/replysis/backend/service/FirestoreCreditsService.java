@@ -43,6 +43,9 @@ public class FirestoreCreditsService {
     //
     // A guest, who has not signed in, gets the same. Both are ONE TIME: see creditsAfterReset.
     static final int FREE_TRIAL_CREDITS = 25;
+    static final int TRIAL_DAYS = 3;
+    static final int TRIAL_CREDITS = 250;          // 50 answers
+    static final int TRIAL_AUDIO_MINUTES = 120;
     private static final int GUEST_FREE_CREDITS = FREE_TRIAL_CREDITS;
     private static final String ANON_COLLECTION = "anon_devices";
 
@@ -821,13 +824,20 @@ public class FirestoreCreditsService {
      * the other only updates it, so the email and display name are filled in by the website afterwards.
      */
     static Map<String, Object> newAccountFields(String uid) {
+        // The 3 day Pro trial every new account starts on (owner, 2026-10-24), the same numbers as the website's
+        // productFacts TRIAL_*. PassExpiryService moves it to Free at passExpiresAt; the refill date sits a day later.
+        Instant trialEnd = Instant.now().plus(TRIAL_DAYS, ChronoUnit.DAYS);
         Map<String, Object> fields = new java.util.HashMap<>();
         fields.put("uid", uid);
-        fields.put("plan", "free");
-        fields.put("credits", FREE_TRIAL_CREDITS);
+        fields.put("plan", "pro");
+        fields.put("planSource", "trial");
+        fields.put("passExpiresAt", trialEnd.toString());
+        fields.put("trialStartedAt", FieldValue.serverTimestamp());
+        fields.put("audioMinutesAllowance", TRIAL_AUDIO_MINUTES);
+        fields.put("credits", TRIAL_CREDITS);
         fields.put("creditsUsed", 0);
         fields.put("purchasedCredits", 0);
-        fields.put("creditsResetDate", nextResetDate());
+        fields.put("creditsResetDate", trialEnd.plus(1, ChronoUnit.DAYS).toString());
         fields.put("stripeCustomerId", null);
         fields.put("stripeSubscriptionId", null);
         fields.put("stripeSubscriptionStatus", null);

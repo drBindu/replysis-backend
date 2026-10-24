@@ -34,7 +34,7 @@ public class SignupAlertService {
                 + "1. Download the app from https://replysis.com (Windows or Mac)\n"
                 + "2. Open it, sign in, and press Start\n"
                 + "3. Ask a practice question out loud. The answer starts in under a second.\n\n"
-                + "Your first 5 answers are free.\n\n"
+                + "Your free 3 day Pro trial includes 50 answers. No card needed.\n\n"
                 + "Invite a friend and you both get 5 more free answers. Your invite link is in the app menu, "
                 + "or at https://replysis.com/account\n\n"
                 + "Good luck with your interviews,\n"
