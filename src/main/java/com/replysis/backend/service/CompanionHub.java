@@ -89,9 +89,9 @@ public class CompanionHub {
         return cmd == null ? Map.of("phones", a.screens.size()) : Map.of("phones", a.screens.size(), "command", cmd);
     }
 
-    /** The phone asking the laptop to do something. Only "stop" for now. */
+    /** The phone asking the laptop to do something: "stop" (finish the interview) or "answer" (answer what was just heard). */
     public boolean command(String uid, String cmd) {
-        if (!"stop".equals(cmd)) return false;
+        if (!"stop".equals(cmd) && !"answer".equals(cmd)) return false;
         Account a = accounts.get(uid);
         if (a == null || System.currentTimeMillis() - a.laptopAt > LAPTOP_FRESH_MS) return false;   // no laptop to tell
         synchronized (a) { a.command = cmd; a.commandAt = System.currentTimeMillis(); }

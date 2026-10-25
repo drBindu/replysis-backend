@@ -52,7 +52,7 @@ public class CompanionController {
         return ResponseEntity.ok(companion.laptop(identity.uid(), listening, heard));
     }
 
-    /** POST /api/v1/companion/command {cmd: "stop"}: the phone asking the laptop to stop listening. */
+    /** POST /api/v1/companion/command {cmd: "stop" | "answer"}: the phone asking the laptop to finish, or to answer now. */
     @PostMapping("/command")
     public ResponseEntity<?> command(@RequestHeader(value = "Authorization", required = false) String authHeader,
                                      @RequestBody(required = false) java.util.Map<String, Object> body) {

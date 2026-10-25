@@ -35,6 +35,8 @@ class CompanionHubTests {
         assertTrue(hub.command("uid1", "stop"));
         assertEquals("stop", hub.laptop("uid1", true, "Tell me about yourself").get("command"));
         assertNull(hub.laptop("uid1", false, "").get("command"), "handed over once, not again");
+        assertTrue(hub.command("uid1", "answer"));
+        assertEquals("answer", hub.laptop("uid1", true, "Why us?").get("command"));
     }
 
     @Test
