@@ -27,6 +27,17 @@ class CompanionHubTests {
     }
 
     @Test
+    void aStopFromThePhoneReachesTheLaptopOnce() {
+        CompanionHub hub = new CompanionHub();
+        assertFalse(hub.command("uid1", "stop"), "no laptop has reported yet, so there is nobody to stop");
+        assertEquals(0, hub.laptop("uid1", true, "Tell me about").get("phones"));
+        assertFalse(hub.command("uid1", "delete everything"), "only stop is accepted");
+        assertTrue(hub.command("uid1", "stop"));
+        assertEquals("stop", hub.laptop("uid1", true, "Tell me about yourself").get("command"));
+        assertNull(hub.laptop("uid1", false, "").get("command"), "handed over once, not again");
+    }
+
+    @Test
     void phoneAndGuestAnswersAreNotRelayed() throws Exception {
         CompanionHub hub = new CompanionHub();
         for (String[] who : new String[][] { { "uid1", "android" }, { "uid1", "ios" }, { null, "windows" } }) {

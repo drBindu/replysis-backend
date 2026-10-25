@@ -53,6 +53,50 @@ public class CompanionHub {
         final Deque<Turn> turns = new ArrayDeque<>();
         final List<SseEmitter> screens = new CopyOnWriteArrayList<>();
         volatile long lastAt = System.currentTimeMillis();
+        // What the laptop app is doing now (2026-10-25): listening or not, and the words it hears, so the phone shows the
+        // interviewer as they speak. Kept only as the latest value, never a history.
+        volatile boolean listening;
+        volatile String heard = "";
+        volatile long laptopAt;
+        // A request from the phone for the laptop ("stop"), picked up by the laptop's next report. Expires after 30 s.
+        volatile String command;
+        volatile long commandAt;
+    }
+
+    private static final long LAPTOP_FRESH_MS = 90_000;
+    private static final long COMMAND_TTL_MS = 30_000;
+    private static final int  MAX_HEARD_CHARS = 2_000;
+
+    /**
+     * The laptop app reporting what it is doing. Returns how many phone screens are open (so the laptop stops sending
+     * when nobody is watching) and any request from the phone, which is handed over once.
+     */
+    public Map<String, Object> laptop(String uid, boolean listening, String heard) {
+        Account a = accounts.computeIfAbsent(uid, k -> new Account());
+        String h = heard == null ? "" : (heard.length() > MAX_HEARD_CHARS ? heard.substring(heard.length() - MAX_HEARD_CHARS) : heard);
+        boolean changed = a.listening != listening || !a.heard.equals(h) || System.currentTimeMillis() - a.laptopAt > LAPTOP_FRESH_MS / 2;
+        a.listening = listening;
+        a.heard = h;
+        a.laptopAt = System.currentTimeMillis();
+        a.lastAt = a.laptopAt;
+        if (changed) broadcast(a, Map.of("t", "laptop", "listening", listening, "heard", h));
+        String cmd = null;
+        synchronized (a) {
+            if (a.command != null && System.currentTimeMillis() - a.commandAt < COMMAND_TTL_MS) cmd = a.command;
+            a.command = null;
+        }
+        if (cmd != null) broadcast(a, Map.of("t", "cmd", "cmd", cmd, "state", "delivered"));
+        return cmd == null ? Map.of("phones", a.screens.size()) : Map.of("phones", a.screens.size(), "command", cmd);
+    }
+
+    /** The phone asking the laptop to do something. Only "stop" for now. */
+    public boolean command(String uid, String cmd) {
+        if (!"stop".equals(cmd)) return false;
+        Account a = accounts.get(uid);
+        if (a == null || System.currentTimeMillis() - a.laptopAt > LAPTOP_FRESH_MS) return false;   // no laptop to tell
+        synchronized (a) { a.command = cmd; a.commandAt = System.currentTimeMillis(); }
+        broadcast(a, Map.of("t", "cmd", "cmd", cmd, "state", "sent"));
+        return true;
     }
 
     private final Map<String, Account> accounts = new ConcurrentHashMap<>();
@@ -77,6 +121,8 @@ public class CompanionHub {
                     "done", t.done, "src", t.source, "at", t.at));
         }
         send(a, emitter, Map.of("t", "hist", "turns", recent));
+        boolean fresh = System.currentTimeMillis() - a.laptopAt < LAPTOP_FRESH_MS;
+        send(a, emitter, Map.of("t", "laptop", "listening", fresh && a.listening, "heard", fresh ? a.heard : "", "seen", fresh));
         return emitter;
     }
 
