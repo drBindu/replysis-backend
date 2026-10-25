@@ -143,6 +143,52 @@ public class ResumeController {
         }
     }
 
+    // ─── 1c. Read a resume file ────────────────────────────────────────────────
+    // The phone app (2026-10-24) cannot read a PDF or Word file itself the way the website does in the browser, so it
+    // sends the file here and gets the plain text back. Nothing is stored: the file is read in memory and dropped.
+    private static final int MAX_RESUME_FILE_BYTES = 5 * 1024 * 1024;
+
+    @PostMapping(value = "/extract-text", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> extractText(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            HttpServletRequest request,
+            @RequestParam("file") org.springframework.web.multipart.MultipartFile file) {
+        AuthUser user = verifyToken(authHeader);
+        if (user == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Authentication required"));
+        if (!(rateLimiter.tryAcquire("resume-extract:ip:" + rateLimiter.clientIp(request), 12, 60_000L)
+                && rateLimiter.tryAcquire("resume-extract:user:" + user.uid(), 6, 60_000L)))
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "Too many tries. Wait a moment and try again."));
+        if (file == null || file.isEmpty() || file.getSize() > MAX_RESUME_FILE_BYTES)
+            return ResponseEntity.badRequest().body(Map.of("error", "Choose a PDF, Word or text file under 5 MB."));
+        String name = String.valueOf(file.getOriginalFilename()).toLowerCase(java.util.Locale.ROOT);
+        try {
+            byte[] bytes = file.getBytes();
+            String text;
+            if (name.endsWith(".pdf") || (bytes.length > 4 && bytes[0] == '%' && bytes[1] == 'P' && bytes[2] == 'D' && bytes[3] == 'F')) {
+                try (var pdf = org.apache.pdfbox.Loader.loadPDF(bytes)) {
+                    text = new org.apache.pdfbox.text.PDFTextStripper().getText(pdf);
+                }
+            } else if (name.endsWith(".docx")) {
+                try (var doc = new org.apache.poi.xwpf.usermodel.XWPFDocument(new java.io.ByteArrayInputStream(bytes));
+                     var ex = new org.apache.poi.xwpf.extractor.XWPFWordExtractor(doc)) {
+                    text = ex.getText();
+                }
+            } else if (name.endsWith(".txt") || name.endsWith(".md")) {
+                text = new String(bytes, StandardCharsets.UTF_8);
+            } else {
+                return ResponseEntity.badRequest().body(Map.of("error", "Choose a PDF, Word (.docx) or text file."));
+            }
+            text = text.replace("\r", "").replaceAll("[ \t]+\n", "\n").replaceAll("\n{3,}", "\n\n").trim();
+            if (text.length() < 40)
+                return ResponseEntity.badRequest().body(Map.of("error", "We could not find any text in that file. If it is a scanned image, paste the text instead."));
+            return ResponseEntity.ok(Map.of("text", text.length() > 30_000 ? text.substring(0, 30_000) : text));
+        } catch (Exception e) {
+            System.err.println("Resume extract failed: " + e.getClass().getSimpleName());
+            return ResponseEntity.badRequest().body(Map.of("error", "We could not read that file. Try a PDF or Word file, or paste the text."));
+        }
+    }
+
     // ─── 2. AI Tailor ──────────────────────────────────────────────────────────
     @PostMapping("/tailor")
     public ResponseEntity<?> tailorResume(
