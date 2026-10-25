@@ -50,6 +50,11 @@ public class InterviewController {
     @Autowired
     private SimpleRateLimiter rateLimiter;
 
+    // Copies each answer, as it streams, to the same account's phone (the mobile app's Companion screen). Spring sets the
+    // shared one; a controller built by hand in a test gets its own, which nobody is listening to.
+    @Autowired(required = false)
+    private com.replysis.backend.service.CompanionHub companion = new com.replysis.backend.service.CompanionHub();
+
 
     @Value("${gemini.api.key:}")
     private String geminiApiKey;
@@ -439,7 +444,11 @@ public class InterviewController {
                                         ANSWER_COST, answerUsage));
 
         // 7. Stream response
-        StreamingResponseBody stream = outputStream -> {
+        final com.replysis.backend.security.AppInfo companionApp = com.replysis.backend.security.AppInfo.current();
+        final String companionQuestion = question;
+        StreamingResponseBody stream = rawOut -> {
+            final com.replysis.backend.service.CompanionHub.Relay outputStream = companion.relay(identity.uid(),
+                    companionApp == null ? null : companionApp.platform(), companionQuestion, "voice", rawOut);
             boolean providerAccepted = false;
             boolean answerDelivered = false;
             // Whether credits were actually taken.
@@ -580,6 +589,7 @@ public class InterviewController {
                     outputStream.flush();
                 } catch (Exception ignored) {}
             } finally {
+                outputStream.finish();   // the phone's copy of this answer is complete
                 // What this answer actually cost, recorded against the charge.
                 // A retry streams into the same slots, so the figure stored is
                 // the attempt that reached the candidate.
@@ -1001,7 +1011,11 @@ public class InterviewController {
             return ResponseEntity.status(402).build(); // Payment Required
         }
 
-        StreamingResponseBody stream = outputStream -> {
+        final com.replysis.backend.security.AppInfo companionApp = com.replysis.backend.security.AppInfo.current();
+        final String companionQuestion = "From your screen";
+        StreamingResponseBody stream = rawOut -> {
+            final com.replysis.backend.service.CompanionHub.Relay outputStream = companion.relay(identity.uid(),
+                    companionApp == null ? null : companionApp.platform(), companionQuestion, "screen", rawOut);
             boolean providerAccepted = false;
             boolean answerDelivered = false;
             try {
@@ -1247,6 +1261,7 @@ public class InterviewController {
                     outputStream.flush();
                 } catch (Exception ignored) {}
             } finally {
+                outputStream.finish();   // the phone's copy of this answer is complete
                 // Vision is billed by token like everything else, so record it
                 // the same way and the portal can compare a screen read with an
                 // answer rather than counting both as one action.
