@@ -1898,10 +1898,14 @@ public class InterviewController {
 
                 PROBLEM: the exact title and the full statement as written, including
                 every example and constraint you can see. Copy the wording; do not
-                summarise it. If the screen is not a coding problem, an editor, or an
-                error — a browser tab, a dashboard, anything ordinary — write "none:
-                not a coding screen" and say plainly what the screen actually is
-                instead. Never invent a problem to have one to report.
+                summarise it. A coding question counts wherever it is shown: on a
+                coding site, inside a chat or AI assistant page such as ChatGPT, in a
+                document, a slide or a picture. If several are listed, report the one
+                the interviewer's question points to, else the first one in full.
+                Only if no coding question, code or error is visible anywhere on the
+                screen (a desktop, a dashboard, an empty page), write "none: not a
+                coding screen" and say plainly what the screen actually is instead.
+                Never invent a problem to have one to report.
                 LANGUAGE: the language selected in the editor, or "none".
                 EXISTING CODE: the code currently in the editor, exactly as written,
                 or "none".
