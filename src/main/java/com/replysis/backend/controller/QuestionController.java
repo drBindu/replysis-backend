@@ -133,14 +133,16 @@ public class QuestionController {
                     "This is not set up on this server yet. You were not charged.", false);
 
         UsageEventService.Context usage = UsageEventService.Context.of(action);
-        if (!creditsService.deductCredits(user.uid(), credits, usage))
+        // With the Practice plan, the Maya add-on, or the one free interview, the mock interview uses no answers.
+        boolean included = mockIncluded(user.uid());
+        if (!included && !creditsService.deductCredits(user.uid(), credits, usage))
             return fail(HttpStatus.PAYMENT_REQUIRED, "insufficient_credits",
                     "You do not have enough answers left for this.", false);
 
         try {
             return ResponseEntity.ok(work.run());
         } catch (GenerationException e) {
-            refund(user.uid(), credits, usage);
+            if (!included) refund(user.uid(), credits, usage);
             System.err.println("[QUESTIONS] " + action + " failed (" + e.kind() + "): " + e.getMessage());
             if (e.kind() == GenerationException.Kind.BAD_OUTPUT)
                 return fail(HttpStatus.BAD_GATEWAY, "bad_output",
@@ -148,11 +150,46 @@ public class QuestionController {
             return fail(HttpStatus.BAD_GATEWAY, "provider_unavailable",
                     "The service could not be reached right now. You were not charged. Please try again in a minute.", true);
         } catch (RuntimeException e) {
-            refund(user.uid(), credits, usage);
+            if (!included) refund(user.uid(), credits, usage);
             System.err.println("[QUESTIONS] " + action + " unexpected failure: " + e.getClass().getSimpleName());
             return fail(HttpStatus.INTERNAL_SERVER_ERROR, "question_service_error",
                     "Something went wrong. You were not charged. Please try again.", true);
         }
+    }
+
+    /** Reads the person's account for {@link #mockIncludedFor}; a read failure means "charge as usual". */
+    private static boolean mockIncluded(String uid) {
+        try {
+            Map<String, Object> d = com.google.firebase.cloud.FirestoreClient.getFirestore()
+                    .collection("users").document(uid).get().get().getData();
+            return mockIncludedFor(d, System.currentTimeMillis());
+        } catch (Exception e) {
+            System.err.println("[QUESTIONS] could not read the plan, charging as usual: " + e.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /**
+     * Whether the mock interview's own steps use no answers (owner, 2026-10-26). The same rule as the website's
+     * app/lib/paid-plan.ts mockStepsFree: the Practice plan (mockPlan, or mockPlanUntil in the future); a paid plan (not
+     * free, not a trial) with the Maya add-on (mayaAddon, or mayaAddonUntil in the future) or an internal account; the one
+     * free interview while it is unused, or for half an hour after it starts (mayaFreeUsedAt).
+     */
+    static boolean mockIncludedFor(Map<String, Object> d, long now) {
+        if (d == null) return false;
+        if (Boolean.TRUE.equals(d.get("mockPlan")) || future(d.get("mockPlanUntil"), now)) return true;
+        Object plan = d.get("plan");
+        boolean paid = plan instanceof String p && !p.isBlank() && !"free".equalsIgnoreCase(p) && !"trial".equals(d.get("planSource"));
+        if (paid && (Boolean.TRUE.equals(d.get("internal")) || Boolean.TRUE.equals(d.get("mayaAddon"))
+                || future(d.get("mayaAddonUntil"), now))) return true;
+        if (!Boolean.TRUE.equals(d.get("mayaFreeUsed"))) return true;
+        Object at = d.get("mayaFreeUsedAt");
+        return at instanceof com.google.cloud.Timestamp t && now - t.toDate().getTime() < 30 * 60_000L;
+    }
+
+    private static boolean future(Object iso, long now) {
+        if (!(iso instanceof String s) || s.isBlank()) return false;
+        try { return java.time.Instant.parse(s).toEpochMilli() > now; } catch (Exception e) { return false; }
     }
 
     private void refund(String uid, int credits, UsageEventService.Context usage) {
