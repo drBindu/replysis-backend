@@ -258,10 +258,15 @@ public class InterviewController {
         // holding 500 answers (2026-10-22). Display only; the minutes stay on the account and are still spent first.
         boolean planCovers = credits.isUnlimited || (!"free".equalsIgnoreCase(credits.plan) && credits.credits >= 20);
         int minutesShown = planCovers ? 0 : credits.minutesBalance;
+        // The Practice plan (2026-10-27) sits on a free account with its own monthly answers: "practice" lets the apps say
+        // "Practice" instead of "5 answers, one time". Older apps ignore it.
+        boolean practice = !identity.isGuest() && "free".equalsIgnoreCase(credits.plan)
+                && QuestionController.practiceActive(identity.uid());
         return ResponseEntity.ok(Map.of(
                 "credits",        reported,
                 "creditsReal",    credits.credits,
                 "plan",           credits.plan,
+                "practice",       practice,
                 "isUnlimited",    credits.isUnlimited,
                 "minutesBalance", minutesShown
         ));

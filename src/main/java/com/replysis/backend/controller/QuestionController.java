@@ -187,6 +187,18 @@ public class QuestionController {
         return at instanceof com.google.cloud.Timestamp t && now - t.toDate().getTime() < 30 * 60_000L;
     }
 
+    /** Whether the Practice plan is running for this account (the apps show "Practice" instead of the free plan). */
+    public static boolean practiceActive(String uid) {
+        try {
+            Map<String, Object> d = com.google.firebase.cloud.FirestoreClient.getFirestore()
+                    .collection("users").document(uid).get().get().getData();
+            long now = System.currentTimeMillis();
+            return d != null && (Boolean.TRUE.equals(d.get("mockPlan")) || future(d.get("mockPlanUntil"), now));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static boolean future(Object iso, long now) {
         if (!(iso instanceof String s) || s.isBlank()) return false;
         try { return java.time.Instant.parse(s).toEpochMilli() > now; } catch (Exception e) { return false; }
