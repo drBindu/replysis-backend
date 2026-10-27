@@ -86,7 +86,7 @@ public class PassExpiryService {
                 alerts.toUserOnce("trial-reminder-" + doc.getId(), email,
                         "Your Replysis trial ends tomorrow",
                         "Hi" + first + ",\n\n"
-                                + "Your free Replysis Pro trial ends on " + DAY.format(Instant.parse(end)) + ".\n\n"
+                                + "Your free Replysis trial ends on " + DAY.format(Instant.parse(end)) + ".\n\n"
                                 + "To keep live answers for your interviews, choose a plan here:\n"
                                 + "https://replysis.com/pricing\n\n"
                                 + "Good luck with your interviews,\nThe Replysis team\n");
