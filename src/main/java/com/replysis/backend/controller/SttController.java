@@ -49,10 +49,11 @@ public class SttController {
     // enough for the desktop client to recover from a restart.
     private static final int TOKEN_TTL_SECONDS = 3_600;
 
-    // An interview mints ~1 token per engine start. These ceilings are far above
-    // real usage but stop token farming cold.
-    private static final int PER_IDENTITY_PER_HOUR = 12;
-    private static final int PER_IP_PER_MINUTE     = 5;
+    // The desktop app mints ~1 token per engine start, but a mock interview on the website mints one per answer, so
+    // 12 an hour locked out someone doing two practice interviews in an hour (the owner hit it, 2026-10-27). Audio is
+    // metered and limited separately; these ceilings only stop token farming.
+    private static final int PER_IDENTITY_PER_HOUR = 60;
+    private static final int PER_IP_PER_MINUTE     = 15;
 
     // These strict limits are for MINTING, which costs money. They apply only when a token
     // is about to be issued. A request that is refused with 402 (no credits, no listening
