@@ -180,6 +180,8 @@ public class QuestionController {
         if (Boolean.TRUE.equals(d.get("mockPlan")) || future(d.get("mockPlanUntil"), now)) return true;
         Object plan = d.get("plan");
         boolean paid = plan instanceof String p && !p.isBlank() && !"free".equalsIgnoreCase(p) && !"trial".equals(d.get("planSource"));
+        // Max includes Maya (2026-10-27), as on the website (data/mayaAddon.ts MAX_INCLUDES_MAYA).
+        if (paid && "max".equalsIgnoreCase((String) plan)) return true;
         if (paid && (Boolean.TRUE.equals(d.get("internal")) || Boolean.TRUE.equals(d.get("mayaAddon"))
                 || future(d.get("mayaAddonUntil"), now))) return true;
         if (!Boolean.TRUE.equals(d.get("mayaFreeUsed"))) return true;
