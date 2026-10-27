@@ -262,11 +262,15 @@ public class InterviewController {
         // "Practice" instead of "5 answers, one time". Older apps ignore it.
         boolean practice = !identity.isGuest() && "free".equalsIgnoreCase(credits.plan)
                 && QuestionController.practiceActive(identity.uid());
+        // "trial": the 3 day free trial runs on plan "pro"; apps show "Free trial", never "Pro" (owner, 2026-10-27).
+        boolean trial = !identity.isGuest() && !"free".equalsIgnoreCase(credits.plan)
+                && QuestionController.trialActive(identity.uid());
         return ResponseEntity.ok(Map.of(
                 "credits",        reported,
                 "creditsReal",    credits.credits,
                 "plan",           credits.plan,
                 "practice",       practice,
+                "trial",          trial,
                 "isUnlimited",    credits.isUnlimited,
                 "minutesBalance", minutesShown
         ));

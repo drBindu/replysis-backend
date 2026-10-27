@@ -201,6 +201,17 @@ public class QuestionController {
         }
     }
 
+    /** The 3 day free trial (planSource "trial"): it runs on the Pro plan but is shown as "Free trial", never Pro (2026-10-27). */
+    public static boolean trialActive(String uid) {
+        try {
+            Map<String, Object> d = com.google.firebase.cloud.FirestoreClient.getFirestore()
+                    .collection("users").document(uid).get().get().getData();
+            return d != null && "trial".equals(d.get("planSource"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static boolean future(Object iso, long now) {
         if (!(iso instanceof String s) || s.isBlank()) return false;
         try { return java.time.Instant.parse(s).toEpochMilli() > now; } catch (Exception e) { return false; }
