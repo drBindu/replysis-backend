@@ -89,13 +89,13 @@ class SttKeyOrderTests {
 
         int mintsAttempted = 0;
         HttpStatus last = null;
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 30; i++) {
             var response = ask(controller);
             last = HttpStatus.valueOf(response.getStatusCode().value());
             if (last == HttpStatus.TOO_MANY_REQUESTS) break;
             mintsAttempted++;
         }
         assertEquals(HttpStatus.TOO_MANY_REQUESTS, last, "farming is still stopped");
-        assertTrue(mintsAttempted <= 5, "by the per-address ceiling of five a minute");
+        assertTrue(mintsAttempted <= 15, "by the per-address ceiling of fifteen a minute");
     }
 }

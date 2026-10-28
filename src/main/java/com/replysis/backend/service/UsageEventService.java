@@ -167,17 +167,29 @@ public class UsageEventService {
      * these in order, so in practice the charge row is always written first.
      */
     public void attachTokens(String eventId, long promptTokens, long completionTokens, long latencyMs) {
+        attachTokens(eventId, promptTokens, completionTokens, latencyMs, 0);
+    }
+
+    /**
+     * @param latencyMs the wait until the first words were sent; 0 if none were
+     * @param totalMs   until the whole answer was sent
+     */
+    public void attachTokens(String eventId, long promptTokens, long completionTokens, long latencyMs, long totalMs) {
         if (eventId == null || eventId.isBlank()) return;
-        if (promptTokens <= 0 && completionTokens <= 0) return;
+        // A read stopped early (Space pressed again) has no token counts but still has a speed worth showing.
+        if (promptTokens <= 0 && completionTokens <= 0 && latencyMs <= 0) return;
 
         try {
             writer.execute(() -> {
                 try {
                     Map<String, Object> patch = new HashMap<>();
-                    patch.put("promptTokens", promptTokens);
-                    patch.put("completionTokens", completionTokens);
-                    patch.put("totalTokens", promptTokens + completionTokens);
+                    if (promptTokens > 0 || completionTokens > 0) {
+                        patch.put("promptTokens", promptTokens);
+                        patch.put("completionTokens", completionTokens);
+                        patch.put("totalTokens", promptTokens + completionTokens);
+                    }
                     if (latencyMs > 0) patch.put("latencyMs", latencyMs);
+                    if (totalMs > 0) patch.put("totalMs", totalMs);
 
                     Firestore db = FirestoreClient.getFirestore();
                     db.collection(COLLECTION).document(eventId).update(patch);

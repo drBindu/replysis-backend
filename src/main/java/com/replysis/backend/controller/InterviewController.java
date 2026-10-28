@@ -441,7 +441,7 @@ public class InterviewController {
                         answerOnCerebras ? "cerebras" : "gemini",
                         answerOnCerebras ? ANSWER_MODEL_CEREBRAS : ANSWER_MODEL_GEMINI);
         // Prompt and completion tokens, filled in by the stream below.
-        final long[] answerTokens = new long[2];
+        final long[] answerTokens = new long[3];   // prompt, completion, when the first words were sent
 
         long chargeStart = System.currentTimeMillis();
         java.util.concurrent.CompletableFuture<Boolean> chargeTask =
@@ -602,8 +602,9 @@ public class InterviewController {
                 // What this answer actually cost, recorded against the charge.
                 // A retry streams into the same slots, so the figure stored is
                 // the attempt that reached the candidate.
+                // latencyMs is the wait for the first words (what the person feels); totalMs is the whole answer.
                 usageEvents.attachTokens(answerUsage.eventId(), answerTokens[0], answerTokens[1],
-                        System.currentTimeMillis() - chargeStart);
+                        answerTokens[2] > 0 ? answerTokens[2] - chargeStart : 0, System.currentTimeMillis() - chargeStart);
 
                 // No answer was delivered, return the up-front charge. Only if
                 // there was one: see chargeTaken above.
@@ -1002,7 +1003,7 @@ public class InterviewController {
                 com.replysis.backend.service.UsageEventService.Context.tracked(
                         com.replysis.backend.service.UsageEventService.ACTION_SCREEN,
                         "gemini", VISION_MODEL_GEMINI);
-        final long[] screenTokens = new long[2];
+        final long[] screenTokens = new long[3];
         // Set when the model says there was nothing on the screen to answer, so that read is not charged.
         final boolean[] nothingAsked = new boolean[1];
 
@@ -1275,7 +1276,7 @@ public class InterviewController {
                 // the same way and the portal can compare a screen read with an
                 // answer rather than counting both as one action.
                 usageEvents.attachTokens(screenUsage.eventId(), screenTokens[0], screenTokens[1],
-                        System.currentTimeMillis() - chargeStart);
+                        screenTokens[2] > 0 ? screenTokens[2] - chargeStart : 0, System.currentTimeMillis() - chargeStart);
 
                 // No answer was delivered, or the screen held nothing to answer: return the up-front charge.
                 if (nothingAsked[0]) System.out.println("[SCREEN] Nothing on the screen to answer; not charged.");
@@ -1657,6 +1658,7 @@ public class InterviewController {
                 released = true;
                 for (String h : held) outputStream.write((h + "\n\n").getBytes());
                 outputStream.flush();
+                markFirstWords(tokensOut);
                 held.clear();
             }
         } catch (java.io.IOException interrupted) {
@@ -1678,8 +1680,14 @@ public class InterviewController {
                 nothingAskedOut[0] = true;
             for (String h : held) outputStream.write((h + "\n\n").getBytes());
             outputStream.flush();
+            markFirstWords(tokensOut);
         }
         return delivered;
+    }
+
+    /** The moment the first words left for the person, kept in slot 2 so the speed shown in admin is the real wait. */
+    private static void markFirstWords(long[] tokensOut) {
+        if (tokensOut != null && tokensOut.length >= 3 && tokensOut[2] == 0) tokensOut[2] = System.currentTimeMillis();
     }
 
     /**
