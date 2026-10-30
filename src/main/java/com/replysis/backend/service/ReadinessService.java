@@ -52,6 +52,12 @@ public class ReadinessService {
     private static final long PROBE_TIMEOUT_MS = 9_000;
     /** A part is only called down after this many checks in a row fail. */
     static final int DOWN_AFTER_MISSES = 2;
+    /**
+     * The owner is emailed only when a part has stayed down this long. Every email in two days was a provider blip that was
+     * back within a minute (Deepgram, the screen model), and no customer felt any of them (owner, 2026-10-30: "why am I
+     * getting these mails"). The admin panel still shows the part red at once.
+     */
+    static final long EMAIL_AFTER_DOWN_MS = 3 * 60_000L;
 
     @Autowired private InterviewController interview;
     @Autowired private SttController stt;
@@ -71,6 +77,7 @@ public class ReadinessService {
     private final Map<String, Integer> misses = new ConcurrentHashMap<>();
     /** Parts this instance has announced as down, so it announces them coming back. */
     private final java.util.Set<String> announcedDown = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Long> downSince = new ConcurrentHashMap<>();
 
     private static final Map<String, String> LABEL = Map.of(
             "answer_model", "Answers",
@@ -170,13 +177,15 @@ public class ReadinessService {
         if (alerts == null) return;
         String label = LABEL.getOrDefault(name, name);
         if (!result.ok() && missed >= DOWN_AFTER_MISSES) {
+            long since = downSince.computeIfAbsent(name, k -> System.currentTimeMillis());
+            if (System.currentTimeMillis() - since < EMAIL_AFTER_DOWN_MS) return;
             announcedDown.add(name);
             alerts.raise("part-" + name, "Replysis: " + label + " is down",
                     label + " is not responding (" + (result.note() == null || result.note().isBlank() ? "no reason given" : result.note()) + ").\n\n"
                             + CUSTOMERS_FEEL.getOrDefault(name, "") + "\n\n"
                             + "Look: https://replysis.com/admin (the Live panel shows each part).\n"
                             + "I will write again when it is back, or every 30 minutes while it is still down.");
-        } else if (result.ok() && announcedDown.remove(name)) {
+        } else if (result.ok() && downSince.remove(name) != null && announcedDown.remove(name)) {
             alerts.recovered("part-" + name, "Replysis: " + label + " is back",
                     label + " is answering again (" + result.ms() + " ms).");
         }
