@@ -77,13 +77,23 @@ public class DiagnosticsController {
                 + " msg=\"" + message + "\""
                 + " frames=\"" + frames + "\"");
         record(version, os, source, type, message, frames, detail, user);
-        if (alerts != null) {
+        if (alerts != null && isRealError(type)) {
             alerts.noteFailure("app-errors", 5, 10 * 60_000L, "Replysis: apps are reporting errors",
                     "Desktop apps are reporting errors on customers' computers.\n\nThe latest: version " + version + ", " + type
                             + (message.isEmpty() ? "" : " (" + message + ")") + ".\n\n"
                             + "Look: https://replysis.com/admin (Live panel, Problems).");
         }
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Whether a report means something broke. A customer out of free answers, or a hiding report for a dropdown, is shown in
+     * admin but is not an error: one trial customer with no answers left set off "apps are reporting errors" (2026-11-01).
+     */
+    static boolean isRealError(String type) {
+        String t = type == null ? "" : type.toLowerCase(java.util.Locale.ROOT);
+        return !(t.contains("nocredits") || t.contains("free-answers") || t.contains("trial") || t.contains("upgrade")
+                || t.endsWith("-minor"));
     }
 
     // The same cleaned fields, kept so the admin portal's Live panel can show a problem the moment it happens instead of

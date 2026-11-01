@@ -39,4 +39,14 @@ class DiagnosticsControllerTests {
         assertEquals("", DiagnosticsController.clean(12345, 10));
         assertEquals("", DiagnosticsController.clean(null, 10));
     }
+
+    @Test
+    void expectedStatesDoNotEmailTheOwner() {
+        assertFalse(DiagnosticsController.isRealError("Problem.listening-NoCredits"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-your-free-answers-are-used"));
+        assertFalse(DiagnosticsController.isRealError("Problem.stealth-refused-minor"));
+        assertTrue(DiagnosticsController.isRealError("Problem.stealth-refused"));
+        assertTrue(DiagnosticsController.isRealError("Crash NullReferenceException"));
+        assertTrue(DiagnosticsController.isRealError("Problem.listening-UnstableConnection"));
+    }
 }
