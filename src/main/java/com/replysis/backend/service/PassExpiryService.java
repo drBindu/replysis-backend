@@ -32,7 +32,9 @@ public class PassExpiryService {
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMMM").withZone(ZoneId.of("Asia/Kolkata"));
 
-    /** Plans that end at passExpiresAt: an India month paid once, or the 3 day trial every new account starts on. */
+    static final int TRIAL_REMINDER_HOURS = 4;
+
+    /** Plans that end at passExpiresAt: an India month paid once, or the 1 day trial every new account starts on. */
     static boolean timed(String planSource) {
         return "pass".equals(planSource) || "trial".equals(planSource);
     }
@@ -71,10 +73,11 @@ public class PassExpiryService {
                 System.out.println("[PASS] " + doc.getString("planSource") + " ended, back to free: " + doc.getId());
             }
 
-            // A trial with under a day left: one reminder, with how to keep going.
+            // A trial near its end: one reminder, with how to keep going. A trial is one day long, so this window must stay
+            // well under a day or every new account would get the reminder as it signs up.
             var trialSoon = db.collection("users")
                     .whereGreaterThan("passExpiresAt", now.toString())
-                    .whereLessThanOrEqualTo("passExpiresAt", now.plus(1, ChronoUnit.DAYS).toString())
+                    .whereLessThanOrEqualTo("passExpiresAt", now.plus(TRIAL_REMINDER_HOURS, ChronoUnit.HOURS).toString())
                     .limit(100).get().get(15, TimeUnit.SECONDS);
             for (QueryDocumentSnapshot doc : trialSoon.getDocuments()) {
                 if (!"trial".equals(doc.getString("planSource"))) continue;
@@ -84,9 +87,9 @@ public class PassExpiryService {
                 String name = doc.getString("displayName");
                 String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\s+")[0];
                 alerts.toUserOnce("trial-reminder-" + doc.getId(), email,
-                        "Your Replysis trial ends tomorrow",
+                        "Your Replysis free trial ends soon",
                         "Hi" + first + ",\n\n"
-                                + "Your free Replysis trial ends on " + DAY.format(Instant.parse(end)) + ".\n\n"
+                                + "Your free Replysis trial ends in a few hours.\n\n"
                                 + "To keep live answers for your interviews, choose a plan here:\n"
                                 + "https://replysis.com/pricing\n\n"
                                 + "Good luck with your interviews,\nThe Replysis team\n");

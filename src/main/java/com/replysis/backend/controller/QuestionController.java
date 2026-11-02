@@ -201,7 +201,7 @@ public class QuestionController {
         }
     }
 
-    /** The 3 day free trial (planSource "trial"): it runs on the Pro plan but is shown as "Free trial", never Pro (2026-10-27). */
+    /** The 1 day free trial (planSource "trial"): it runs on the Pro plan but is shown as "Free trial", never Pro (2026-10-27). */
     public static boolean trialActive(String uid) {
         try {
             Map<String, Object> d = com.google.firebase.cloud.FirestoreClient.getFirestore()

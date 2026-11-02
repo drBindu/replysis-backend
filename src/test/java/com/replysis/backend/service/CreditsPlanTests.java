@@ -73,12 +73,12 @@ class CreditsPlanTests {
     @Test
     void aBrandNewAccountStartsWithTheFreeTrialAndNothingPaid() {
         var fields = FirestoreCreditsService.newAccountFields("abc");
-        assertEquals("pro", fields.get("plan"), "every new account starts on the 3 day Pro trial (2026-10-24)");
+        assertEquals("pro", fields.get("plan"), "every new account starts on the 1 day Pro trial");
         assertEquals("trial", fields.get("planSource"));
         assertEquals(250, fields.get("credits"), "50 answers, so the first speech key request is never refused for credits");
         assertEquals(120, fields.get("audioMinutesAllowance"));
-        long days = java.time.Duration.between(java.time.Instant.now(), java.time.Instant.parse((String) fields.get("passExpiresAt"))).toHours();
-        org.junit.jupiter.api.Assertions.assertTrue(days >= 71 && days <= 72, "ends in 3 days");
+        long hours = java.time.Duration.between(java.time.Instant.now(), java.time.Instant.parse((String) fields.get("passExpiresAt"))).toHours();
+        org.junit.jupiter.api.Assertions.assertTrue(hours >= 23 && hours <= 24, "ends in 1 day");
         assertEquals(0, fields.get("creditsUsed"));
         assertEquals(0, fields.get("purchasedCredits"));
         assertEquals("abc", fields.get("uid"));
