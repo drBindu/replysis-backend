@@ -46,6 +46,10 @@ public class FirestoreCreditsService {
     static final int TRIAL_DAYS = 1;
     static final int TRIAL_CREDITS = 250;          // 50 answers
     static final int TRIAL_AUDIO_MINUTES = 120;
+    // The Practice plan's month: the website's data/mayaAddon.ts MOCK_PLAN.
+    static final int PRACTICE_CREDITS = 500;
+    static final int PRACTICE_CREDITS_INDIA = 250;
+    static final int PRACTICE_AUDIO_MINUTES_INDIA = 60;
     private static final int GUEST_FREE_CREDITS = FREE_TRIAL_CREDITS;
     private static final String ANON_COLLECTION = "anon_devices";
 
@@ -390,9 +394,12 @@ public class FirestoreCreditsService {
                     // refill. Resetting to the plan cap alone silently destroyed
                     // credits the customer had already paid for. Free is not refilled.
                     credits = creditsAfterReset(plan, credits, readLong(snap, "purchasedCredits"));
+                    // The listening month ends with it. addListeningMinutes clears the total only while the old date is
+                    // still there, and this runs first, so a paying customer's minutes never came back.
                     tx.update(ref,
                             "credits", credits,
                             "creditsUsed", 0,
+                            "audioMinutesUsed", 0,
                             "creditsResetDate", nextResetDate());
                 }
 
@@ -461,10 +468,12 @@ public class FirestoreCreditsService {
 
                 if (credits < cost) {
                     if (resetAt == null || resetNeeded) {
-                        tx.update(ref,
+                        Map<String, Object> refill = new java.util.HashMap<>(Map.of(
                                 "credits", credits,
                                 "creditsUsed", creditsUsed,
-                                "creditsResetDate", nextResetDate());
+                                "creditsResetDate", nextResetDate()));
+                        if (resetNeeded) refill.put("audioMinutesUsed", 0);
+                        tx.update(ref, refill);
                     }
                     return false;
                 }
@@ -474,14 +483,16 @@ public class FirestoreCreditsService {
                 // been used, every month, to anyone who had ever bought one.
                 long purchasedBefore = readLong(snap, "purchasedCredits");
                 long purchasedAfter = Math.max(0,
-                        purchasedBefore - purchasedPortionOfCharge(creditsUsed, cost, monthlyCredits(plan)));
+                        purchasedBefore - purchasedPortionOfCharge(creditsUsed, cost, chargeCap(plan, snap)));
 
-                tx.update(ref,
+                Map<String, Object> spent = new java.util.HashMap<>(Map.of(
                         "credits", credits - cost,
                         "creditsUsed", creditsUsed + cost,
                         "purchasedCredits", purchasedAfter,
                         "creditsResetDate", resetAt == null || resetNeeded
-                                ? nextResetDate() : resetAt.toString());
+                                ? nextResetDate() : resetAt.toString()));
+                if (resetNeeded) spent.put("audioMinutesUsed", 0);
+                tx.update(ref, spent);
                 return true;
             }).get();
 
@@ -566,7 +577,7 @@ public class FirestoreCreditsService {
                 if (isUnlimitedPlan(plan)) return false;
                 // Answered inside bought minutes, so nothing was taken and nothing is given back.
                 if (minutesCover(context) && readLong(snap, "minutesBalance") > 0) return false;
-                int cap = monthlyCredits(plan);
+                long cap = chargeCap(plan, snap);
                 long credits = readCredits(snap);
                 long creditsUsed = readLong(snap, "creditsUsed");
                 Instant resetAt = readResetDate(snap);
@@ -589,12 +600,14 @@ public class FirestoreCreditsService {
                     creditsUsed = Math.max(0, creditsUsed - cost);
                 }
 
-                tx.update(ref,
+                Map<String, Object> refunded = new java.util.HashMap<>(Map.of(
                         "credits", credits,
                         "creditsUsed", creditsUsed,
                         "purchasedCredits", purchased + purchasedRefund,
                         "creditsResetDate", resetAt == null || resetNeeded
-                                ? nextResetDate() : resetAt.toString());
+                                ? nextResetDate() : resetAt.toString()));
+                if (resetNeeded) refunded.put("audioMinutesUsed", 0);
+                tx.update(ref, refunded);
                 return true;
             }).get();
             System.out.println("Credits refunded: uid=" + uid + " amount=" + cost);
@@ -772,6 +785,34 @@ public class FirestoreCreditsService {
         if (plan == null) return "free";
         String normalized = plan.trim().toLowerCase();
         return PLAN_MONTHLY_CREDITS.containsKey(normalized) ? normalized : "free";
+    }
+
+    /**
+     * The month's own answers before packs start being spent. A Practice account stays on plan "free", whose 25 credits
+     * would count everything after the first five answers as pack spending while Practice answers were still left.
+     * Same rule as the website's productFacts chargeCap.
+     */
+    static long chargeCap(String plan, boolean practiceActive, Long audioAllowance) {
+        if (practiceActive && "free".equals(normalizePlan(plan))) {
+            return audioAllowance != null && audioAllowance == PRACTICE_AUDIO_MINUTES_INDIA ? PRACTICE_CREDITS_INDIA : PRACTICE_CREDITS;
+        }
+        return monthlyCredits(plan);
+    }
+
+    private static long chargeCap(String plan, DocumentSnapshot snap) {
+        return chargeCap(plan, practiceActive(snap.getBoolean("mockPlan"), snap.getString("mockPlanUntil"), Instant.now()),
+                readNullableLong(snap, "audioMinutesAllowance"));
+    }
+
+    /** Whether the Practice plan runs: its subscription, or an India month paid once that has not ended. */
+    static boolean practiceActive(Boolean mockPlan, String mockPlanUntil, Instant now) {
+        if (Boolean.TRUE.equals(mockPlan)) return true;
+        if (mockPlanUntil == null || mockPlanUntil.isBlank()) return false;
+        try {
+            return Instant.parse(mockPlanUntil).isAfter(now);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static int monthlyCredits(String plan) {
