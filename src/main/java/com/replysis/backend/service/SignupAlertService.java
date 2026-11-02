@@ -60,7 +60,7 @@ public class SignupAlertService {
                                 + (name == null || name.isBlank() ? "" : "\nName: " + name)
                                 + "\nSigned up: " + when + " (US Central)"
                                 + "\n\nSee what they do: https://replysis.com/admin");
-                String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\\s+")[0];
+                String first = PassExpiryService.firstName(name);
                 alerts.toUserOnce("welcome-" + doc.getId(), email, "Welcome to Replysis", welcome(first));
             }
         } catch (Exception e) {

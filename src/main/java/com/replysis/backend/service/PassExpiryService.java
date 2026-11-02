@@ -34,6 +34,12 @@ public class PassExpiryService {
 
     static final int TRIAL_REMINDER_HOURS = 4;
 
+    /** " Name" for a greeting. "User" is the placeholder an account starts with, and "Hi User" reads as a mistake. */
+    static String firstName(String name) {
+        if (name == null || name.isBlank() || "User".equals(name.trim())) return "";
+        return " " + name.trim().split("\\s+")[0];
+    }
+
     /** Plans that end at passExpiresAt: an India month paid once, or the 1 day trial every new account starts on. */
     static boolean timed(String planSource) {
         return "pass".equals(planSource) || "trial".equals(planSource);
@@ -134,8 +140,7 @@ public class PassExpiryService {
                 String email = doc.getString("email");
                 String end = doc.getString("passExpiresAt");
                 if (email == null || end == null) continue;
-                String name = doc.getString("displayName");
-                String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\s+")[0];
+                String first = firstName(doc.getString("displayName"));
                 alerts.toUserOnce("trial-reminder-" + doc.getId(), email,
                         "Your Replysis free trial ends soon",
                         "Hi" + first + ",\n\n"
@@ -156,8 +161,7 @@ public class PassExpiryService {
                 String end = doc.getString("passExpiresAt");
                 if (email == null || end == null) continue;
                 String plan = "max".equals(doc.getString("plan")) ? "Max" : "Pro";
-                String name = doc.getString("displayName");
-                String first = name == null || name.isBlank() ? "" : " " + name.trim().split("\s+")[0];
+                String first = firstName(doc.getString("displayName"));
                 alerts.toUserOnce("pass-reminder-" + doc.getId() + "-" + end.substring(0, 10), email,
                         "Your Replysis " + plan + " ends on " + DAY.format(Instant.parse(end)),
                         "Hi" + first + ",\n\n"
