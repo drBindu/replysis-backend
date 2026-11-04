@@ -35,7 +35,7 @@ public class AdminOnlyFilter extends OncePerRequestFilter {
         // With no admin set, nobody is the admin: closed, rather than a server error.
         boolean byUid = adminUid != null && !adminUid.isBlank() && adminUid.equals(user.uid());
         boolean byEmail = (adminUid == null || adminUid.isBlank()) && adminEmail != null && !adminEmail.isBlank()
-                && user.email() != null && adminEmail.trim().equalsIgnoreCase(user.email());
+                && user.emailVerified() && user.email() != null && adminEmail.trim().equalsIgnoreCase(user.email());
         if (!byUid && !byEmail) {
             response.setStatus(403);
             response.getWriter().write("Forbidden");

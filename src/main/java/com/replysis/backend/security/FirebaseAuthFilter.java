@@ -57,7 +57,8 @@ public class FirebaseAuthFilter extends OncePerRequestFilter {
             AuthContext.set(new AuthUser(
                     decoded.getUid(),
                     decoded.getEmail(),
-                    decoded.getName()
+                    decoded.getName(),
+                    decoded.isEmailVerified()
             ));
 
             chain.doFilter(request, response);
