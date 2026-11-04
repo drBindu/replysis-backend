@@ -48,6 +48,8 @@ public class AlertService {
 
     static final long COOLDOWN_MS = 30 * 60_000L;
     static final int  MAX_EMAILS_PER_HOUR = 12;
+    /** News (signups, deletion requests) has its own hourly budget, so a busy signup hour never silences an outage alert. */
+    static final int  MAX_NOTICES_PER_HOUR = 30;
 
     @Value("${firebase.enabled:false}") private boolean firebaseEnabled;
     @Value("${alerts.to:${ADMIN_EMAIL:}}") private String to;
@@ -67,6 +69,7 @@ public class AlertService {
     private final ConcurrentHashMap<String, Open> open = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ArrayDeque<Long>> failures = new ConcurrentHashMap<>();
     private final ArrayDeque<Long> emailedAt = new ArrayDeque<>();
+    private final ArrayDeque<Long> noticedAt = new ArrayDeque<>();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(6)).build();
     private final ObjectMapper json = new ObjectMapper();
 
@@ -146,8 +149,17 @@ public class AlertService {
             // Never mark a notice sent when nothing can send it: four signups were "claimed" before the email key existed
             // and so never emailed (2026-10-22).
             if (!isConfigured()) { record(now, "notice", key, subject, false); return; }
+            // Over budget: not claimed, so the next look sends it once the hour frees up rather than never.
+            if (!withinCap(noticedAt, MAX_NOTICES_PER_HOUR, now)) {
+                System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + " (held: " + MAX_NOTICES_PER_HOUR + " notices this hour)");
+                return;
+            }
             if (!claimOnce(key, now)) return;
-            deliver("notice", key, subject, body, now);
+            boolean emailed = sender.send(to, subject, body);
+            System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : " (email failed)"));
+            // A failed send gives the claim back, so the next look tries again instead of the notice being lost.
+            if (!emailed) unclaim(key);
+            record(now, "notice", key, subject, emailed);
         });
     }
 
@@ -207,21 +219,32 @@ public class AlertService {
     private void deliver(String kind, String key, String subject, String body, long now) {
         boolean emailed = false;
         if (!isConfigured()) {
-            System.out.println("[ALERT] " + kind + " " + key + ": " + subject + " (not emailed: no email key set on the server)");
+            System.out.println("[ALERT] " + kind + " " + key + ": " + maskEmails(subject) + " (not emailed: no email key set on the server)");
         } else if (!withinHourlyCap(now)) {
-            System.out.println("[ALERT] " + kind + " " + key + ": " + subject + " (not emailed: already sent " + MAX_EMAILS_PER_HOUR + " this hour)");
+            System.out.println("[ALERT] " + kind + " " + key + ": " + maskEmails(subject) + " (not emailed: already sent " + MAX_EMAILS_PER_HOUR + " this hour)");
         } else {
             emailed = sender.send(to, subject, body);
-            System.out.println("[ALERT] " + kind + " " + key + ": " + subject + (emailed ? " (emailed)" : " (email failed)"));
+            System.out.println("[ALERT] " + kind + " " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : " (email failed)"));
         }
         record(now, kind, key, subject, emailed);
     }
 
-    private synchronized boolean withinHourlyCap(long now) {
-        while (!emailedAt.isEmpty() && now - emailedAt.peekFirst() > 3_600_000L) emailedAt.pollFirst();
-        if (emailedAt.size() >= MAX_EMAILS_PER_HOUR) return false;
-        emailedAt.addLast(now);
+    private boolean withinHourlyCap(long now) {
+        return withinCap(emailedAt, MAX_EMAILS_PER_HOUR, now);
+    }
+
+    private synchronized boolean withinCap(ArrayDeque<Long> sent, int max, long now) {
+        while (!sent.isEmpty() && now - sent.peekFirst() > 3_600_000L) sent.pollFirst();
+        if (sent.size() >= max) return false;
+        sent.addLast(now);
         return true;
+    }
+
+    private void unclaim(String key) {
+        if (!firebaseEnabled) return;
+        try {
+            FirestoreClient.getFirestore().collection("_alerts").document(key).delete().get(8, TimeUnit.SECONDS);
+        } catch (Exception ignored) { /* stays claimed: the notice is recorded in alert_events either way */ }
     }
 
     /** Whether this instance should send. The database settles it so two instances do not both email. */
@@ -309,6 +332,15 @@ public class AlertService {
             System.err.println("[ALERT] email failed: " + e.getMessage());
             return false;
         }
+    }
+
+    private static final java.util.regex.Pattern EMAIL =
+            java.util.regex.Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}");
+
+    /** Every address in a log line masked the same way (signup subjects carry the whole address). */
+    static String maskEmails(String text) {
+        if (text == null || !text.contains("@")) return text;
+        return EMAIL.matcher(text).replaceAll(m -> java.util.regex.Matcher.quoteReplacement(mask(m.group())));
     }
 
     /** "kr...@gmail.com": enough to see where it went, not enough to harvest. */

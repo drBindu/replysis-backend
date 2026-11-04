@@ -20,6 +20,8 @@ public class AdminOnlyFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
 
+        if ("/admin-api/ping".equals(request.getRequestURI())) { chain.doFilter(request, response); return; }
+
         AuthUser user = AuthContext.get();
         if (user == null) {
             response.setStatus(401);
@@ -27,9 +29,10 @@ public class AdminOnlyFilter extends OncePerRequestFilter {
             return;
         }
 
+        // With no admin set, nobody is the admin: closed, rather than a server error.
         if (adminUid == null || adminUid.isBlank()) {
-            response.setStatus(500);
-            response.getWriter().write("ADMIN_FIREBASE_UID not configured");
+            response.setStatus(403);
+            response.getWriter().write("Forbidden");
             return;
         }
 

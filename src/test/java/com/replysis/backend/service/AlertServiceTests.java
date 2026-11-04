@@ -116,4 +116,10 @@ class AlertServiceTests {
         assertEquals("", AlertService.mask(null));
         assertEquals("", AlertService.mask("not an email"));
     }
+
+    @Test
+    void emailsInLogLinesAreMasked() {
+        assertEquals("New Replysis signup: jo...@example.com", AlertService.maskEmails("New Replysis signup: jonathan@example.com"));
+        assertEquals("nothing here", AlertService.maskEmails("nothing here"));
+    }
 }

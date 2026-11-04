@@ -44,7 +44,15 @@ public class FirebaseAuthFilter extends OncePerRequestFilter {
 
             String token = auth.substring("Bearer ".length()).trim();
 
-            FirebaseToken decoded = firebaseAuthService.verify(token);
+            FirebaseToken decoded;
+            try {
+                decoded = firebaseAuthService.verify(token);
+            } catch (Exception badToken) {
+                // A bad or expired token is a 401, not a server error.
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.getWriter().write("Invalid token");
+                return;
+            }
 
             AuthContext.set(new AuthUser(
                     decoded.getUid(),

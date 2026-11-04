@@ -77,7 +77,9 @@ public class DiagnosticsController {
                 + " msg=\"" + message + "\""
                 + " frames=\"" + frames + "\"");
         record(version, os, source, type, message, frames, detail, user);
-        if (alerts != null && isRealError(type)) {
+        // Reports need no sign in, so one address could send five and email the owner. The email waits until reports
+        // come from at least two addresses inside the window: one computer looping is in admin, not in the inbox.
+        if (alerts != null && isRealError(type) && fromSeveralAddresses(ip, System.currentTimeMillis())) {
             alerts.noteFailure("app-errors", 5, 10 * 60_000L, "Replysis: apps are reporting errors",
                     "Desktop apps are reporting errors on customers' computers.\n\nThe latest: version " + version + ", " + type
                             + (message.isEmpty() ? "" : " (" + message + ")") + ".\n\n"
@@ -90,6 +92,18 @@ public class DiagnosticsController {
      * Whether a report means something broke. A customer out of free answers, or a hiding report for a dropdown, is shown in
      * admin but is not an error: one trial customer with no answers left set off "apps are reporting errors" (2026-11-01).
      */
+    private static final long ALERT_WINDOW_MS = 10 * 60_000L;
+    private final java.util.ArrayDeque<Object[]> recentErrorAddresses = new java.util.ArrayDeque<>();
+
+    /** Notes this address and says whether real errors in the window came from more than one address. */
+    synchronized boolean fromSeveralAddresses(String ip, long now) {
+        recentErrorAddresses.addLast(new Object[]{now, ip});
+        while (!recentErrorAddresses.isEmpty() && now - (long) recentErrorAddresses.peekFirst()[0] > ALERT_WINDOW_MS)
+            recentErrorAddresses.pollFirst();
+        while (recentErrorAddresses.size() > 500) recentErrorAddresses.pollFirst();
+        return recentErrorAddresses.stream().map(e -> e[1]).distinct().count() >= 2;
+    }
+
     static boolean isRealError(String type) {
         String t = type == null ? "" : type.toLowerCase(java.util.Locale.ROOT);
         return !(t.contains("nocredits") || t.contains("free-answers") || t.contains("trial") || t.contains("upgrade")

@@ -49,4 +49,13 @@ class DiagnosticsControllerTests {
         assertTrue(DiagnosticsController.isRealError("Crash NullReferenceException"));
         assertTrue(DiagnosticsController.isRealError("Problem.listening-UnstableConnection"));
     }
+
+    @Test
+    void oneAddressAloneNeverRaisesTheErrorEmail() {
+        DiagnosticsController c = new DiagnosticsController();
+        long now = 10_000_000L;
+        for (int i = 0; i < 10; i++) assertFalse(c.fromSeveralAddresses("1.2.3.4", now + i));
+        assertTrue(c.fromSeveralAddresses("5.6.7.8", now + 20));
+        assertFalse(new DiagnosticsController().fromSeveralAddresses("9.9.9.9", now), "a fresh window needs two addresses again");
+    }
 }

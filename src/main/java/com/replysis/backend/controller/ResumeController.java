@@ -162,30 +162,63 @@ public class ResumeController {
         if (file == null || file.isEmpty() || file.getSize() > MAX_RESUME_FILE_BYTES)
             return ResponseEntity.badRequest().body(Map.of("error", "Choose a PDF, Word or text file under 5 MB."));
         String name = String.valueOf(file.getOriginalFilename()).toLowerCase(java.util.Locale.ROOT);
+        java.util.concurrent.Future<String> reading = null;
         try {
             byte[] bytes = file.getBytes();
-            String text;
-            if (name.endsWith(".pdf") || (bytes.length > 4 && bytes[0] == '%' && bytes[1] == 'P' && bytes[2] == 'D' && bytes[3] == 'F')) {
-                try (var pdf = org.apache.pdfbox.Loader.loadPDF(bytes)) {
-                    text = new org.apache.pdfbox.text.PDFTextStripper().getText(pdf);
-                }
-            } else if (name.endsWith(".docx")) {
-                try (var doc = new org.apache.poi.xwpf.usermodel.XWPFDocument(new java.io.ByteArrayInputStream(bytes));
-                     var ex = new org.apache.poi.xwpf.extractor.XWPFWordExtractor(doc)) {
-                    text = ex.getText();
-                }
-            } else if (name.endsWith(".txt") || name.endsWith(".md")) {
-                text = new String(bytes, StandardCharsets.UTF_8);
-            } else {
+            boolean isPdf = name.endsWith(".pdf") || (bytes.length > 4 && bytes[0] == '%' && bytes[1] == 'P' && bytes[2] == 'D' && bytes[3] == 'F');
+            if (!isPdf && !name.endsWith(".docx") && !name.endsWith(".txt") && !name.endsWith(".md"))
                 return ResponseEntity.badRequest().body(Map.of("error", "Choose a PDF, Word (.docx) or text file."));
-            }
+            // A small file can unpack to gigabytes (a compressed PDF stream, an inflated Word part) and take the whole
+            // server down with it. Reading is held to a memory budget, a page count and a time limit, on its own threads.
+            reading = EXTRACT_POOL.submit(() -> isPdf ? pdfText(bytes)
+                    : name.endsWith(".docx") ? docxText(bytes)
+                    : new String(bytes, StandardCharsets.UTF_8));
+            String text = reading.get(EXTRACT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
             text = text.replace("\r", "").replaceAll("[ \t]+\n", "\n").replaceAll("\n{3,}", "\n\n").trim();
             if (text.length() < 40)
                 return ResponseEntity.badRequest().body(Map.of("error", "We could not find any text in that file. If it is a scanned image, paste the text instead."));
             return ResponseEntity.ok(Map.of("text", text.length() > 30_000 ? text.substring(0, 30_000) : text));
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "Too many tries. Wait a moment and try again."));
         } catch (Exception e) {
-            System.err.println("Resume extract failed: " + e.getClass().getSimpleName());
+            if (reading != null) reading.cancel(true);
+            Throwable cause = e instanceof java.util.concurrent.ExecutionException && e.getCause() != null ? e.getCause() : e;
+            System.err.println("Resume extract failed: " + cause.getClass().getSimpleName());
             return ResponseEntity.badRequest().body(Map.of("error", "We could not read that file. Try a PDF or Word file, or paste the text."));
+        }
+    }
+
+    private static final int EXTRACT_TIMEOUT_SECONDS = 15;
+    private static final int EXTRACT_MAX_PAGES = 30;
+    /** Decoded PDF data held in memory at most; past it the read fails instead of the server. */
+    private static final long EXTRACT_MAX_PDF_MEMORY = 64L * 1024 * 1024;
+    /** Two reads at once and a short queue: the rest are told to wait. */
+    private static final java.util.concurrent.ExecutorService EXTRACT_POOL = new java.util.concurrent.ThreadPoolExecutor(
+            2, 2, 60, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(8), r -> {
+                Thread t = new Thread(r, "resume-extract");
+                t.setDaemon(true);
+                return t;
+            });
+
+    static {
+        // Word files are zips: no part may unpack past a sane size for a resume (a 5 MB file at 1:100 is 500 MB).
+        org.apache.poi.openxml4j.util.ZipSecureFile.setMaxEntrySize(40L * 1024 * 1024);
+        org.apache.poi.openxml4j.util.ZipSecureFile.setMaxTextSize(5L * 1024 * 1024);
+    }
+
+    static String pdfText(byte[] bytes) throws java.io.IOException {
+        try (var pdf = org.apache.pdfbox.Loader.loadPDF(bytes, "", null, null,
+                org.apache.pdfbox.io.MemoryUsageSetting.setupMainMemoryOnly(EXTRACT_MAX_PDF_MEMORY).streamCache)) {
+            var stripper = new org.apache.pdfbox.text.PDFTextStripper();
+            stripper.setEndPage(Math.min(pdf.getNumberOfPages(), EXTRACT_MAX_PAGES));
+            return stripper.getText(pdf);
+        }
+    }
+
+    static String docxText(byte[] bytes) throws java.io.IOException {
+        try (var doc = new org.apache.poi.xwpf.usermodel.XWPFDocument(new java.io.ByteArrayInputStream(bytes));
+             var ex = new org.apache.poi.xwpf.extractor.XWPFWordExtractor(doc)) {
+            return ex.getText();
         }
     }
 
