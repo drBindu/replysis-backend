@@ -210,7 +210,16 @@ public class ReadinessService {
             main = new Probe(false, PROBE_TIMEOUT_MS, "no answer in " + PROBE_TIMEOUT_MS / 1000 + " s", System.currentTimeMillis());
         }
         if (main.ok()) return main;
-        return coverByBackup(main, interview.warmAnswerBackup(), System.currentTimeMillis());
+        // The backup is held to the same limit, on the same spare threads: left open, a hanging backup kept a readiness
+        // thread for a minute and the database check behind it timed out into a false "down" email.
+        long backupMs;
+        try {
+            backupMs = CompletableFuture.supplyAsync(interview::warmAnswerBackup, mainAnswerProbe)
+                    .get(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            backupMs = -1;
+        }
+        return coverByBackup(main, backupMs, System.currentTimeMillis());
     }
 
     /** Its own threads, so a main model call left hanging never takes a slot from the other checks. */

@@ -76,8 +76,8 @@ class SttKeyOrderTests {
         when(credits.hasAudioTimeLeft("uid-1", true)).thenReturn(true); // then the allowance is restored
         var response = ask(controller);
 
-        // Past every limit. It stops at "key not configured" only because this test gives it none.
-        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, response.getStatusCode());
+        // Past every limit. It stops at "no speech token" only because this test configures neither provider.
+        assertEquals(HttpStatus.BAD_GATEWAY, response.getStatusCode());
     }
 
     @Test

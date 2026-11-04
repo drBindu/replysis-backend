@@ -123,22 +123,45 @@ public class SttRelayHandler extends AbstractWebSocketHandler {
         }
     }
 
+    // The JDK WebSocket takes one send at a time: a second send while the first is still going fails, and that failure
+    // was ignored, so audio arriving back to back after a short stall was dropped without a word (2026-11-04). Each send
+    // now waits for the one before it on the same session.
+    private final java.util.Map<String, java.util.concurrent.CompletableFuture<WebSocket>> lastSend =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void sendInOrder(WebSocketSession session, java.util.function.Function<WebSocket, java.util.concurrent.CompletableFuture<WebSocket>> sendIt) {
+        WebSocket up = upstreams.get(session.getId());
+        if (up == null) return;
+        lastSend.compute(session.getId(), (id, before) ->
+                (before == null ? java.util.concurrent.CompletableFuture.completedFuture(up) : before.exceptionally(e -> up))
+                        .thenCompose(sendIt)
+                        .whenComplete((ws, e) -> { if (e != null) System.err.println("[STT-RELAY] upstream send failed: " + e.getClass().getSimpleName()); }));
+    }
+
     @Override
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) {
-        WebSocket up = upstreams.get(session.getId());
-        if (up != null) up.sendBinary(message.getPayload(), message.isLast());
+        ByteBuffer copy = ByteBuffer.allocate(message.getPayloadLength());
+        copy.put(message.getPayload().duplicate()).flip();
+        boolean last = message.isLast();
+        sendInOrder(session, ws -> ws.sendBinary(copy, last));
     }
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
-        WebSocket up = upstreams.get(session.getId());
-        if (up != null) up.sendText(message.getPayload(), message.isLast());
+        String text = message.getPayload();
+        boolean last = message.isLast();
+        sendInOrder(session, ws -> ws.sendText(text, last));
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        WebSocket up = upstreams.remove(session.getId());
-        if (up != null) up.sendClose(WebSocket.NORMAL_CLOSURE, "client closed");
+        var pending = lastSend.remove(session.getId());
+        final WebSocket up = upstreams.remove(session.getId());
+        if (up != null) {
+            // The close goes after whatever audio and end-of-stream text is still on its way.
+            (pending == null ? java.util.concurrent.CompletableFuture.completedFuture(up) : pending.exceptionally(e -> up))
+                    .thenCompose(ws -> ws.sendClose(WebSocket.NORMAL_CLOSURE, "client closed"));
+        }
         System.out.println("[STT-RELAY] closed " + session.getId() + " " + status);
     }
 

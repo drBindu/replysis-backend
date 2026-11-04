@@ -180,23 +180,46 @@ public class SttController {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .header("Retry-After", "3600")
                     .body(Map.of("error",
-                            "The free trial limit for this network has been reached. "
-                            + "Sign in to keep using Replysis."));
+                            "The free trial limit has been reached. Sign in to keep using Replysis."));
         }
 
-        // 4. Check the master key is configured on the server
-        if (speechmaticsApiKey == null || speechmaticsApiKey.isBlank()) {
-            System.err.println("[STT] SPEECHMATICS_API_KEY env var is not set — returning 503");
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(Map.of("error", "Speech service not configured on server"));
-        }
-
-        // 5. Mint a short-lived temporary token — the master key stays server-side
+        // 4 and 5. Mint short-lived tokens; the master keys stay server-side.
         //
-        // Both providers are asked at once. They used to be asked one after the other (Speechmatics, then Deepgram), so the
-        // person waiting to start listening paid for both round trips added together; now they pay for the slower one.
+        // Both providers are asked at once, so the person waiting to start listening pays for the slower round trip, not
+        // both added together. Deepgram is the engine's first choice and Speechmatics its backup, so a Speechmatics outage,
+        // quota or key problem must not stop anyone listening while Deepgram is fine: it used to answer 503 or 502 before
+        // the Deepgram token was even looked at (2026-11-04). Only when neither provider gives a token does the request fail.
         java.util.concurrent.CompletableFuture<String> deepgramNow =
                 java.util.concurrent.CompletableFuture.supplyAsync(this::mintDeepgramToken);
+        String tempKey = mintSpeechmaticsKey();
+        String deepgramToken = deepgramNow.join();
+
+        if (tempKey == null && deepgramToken == null) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                    .body(Map.of("error", "Listening could not start just now. Please try again in a moment."));
+        }
+
+        Map<String, Object> body = new java.util.HashMap<>();
+        // The desktop apps refuse a reply whose "key" is empty, even with a Deepgram token beside it. A placeholder keeps
+        // them on Deepgram; their Speechmatics fallback is simply refused, as it would be anyway while that provider is out.
+        body.put("key", tempKey != null ? tempKey : SPEECHMATICS_UNAVAILABLE_KEY);
+        body.put("expiresIn", TOKEN_TTL_SECONDS);
+        if (deepgramToken != null) body.put("deepgramToken", deepgramToken);
+
+        System.out.println("[STT] Issued " + (tempKey != null ? "SM token" : "no SM token")
+                + (deepgramToken != null ? " + Deepgram token" : "") + " (ttl=" + TOKEN_TTL_SECONDS + "s) to " + identity);
+        return ResponseEntity.ok(body);
+    }
+
+    /** Sent as "key" when Speechmatics gave no token but Deepgram did. Never a real key. */
+    static final String SPEECHMATICS_UNAVAILABLE_KEY = "speech-backup-unavailable";
+
+    /** A short-lived Speechmatics key, or null when it is not configured or refused. Never fails the request by itself. */
+    private String mintSpeechmaticsKey() {
+        if (speechmaticsApiKey == null || speechmaticsApiKey.isBlank()) {
+            System.err.println("[STT] SPEECHMATICS_API_KEY is not set; Deepgram only");
+            return null;
+        }
         try {
             HttpRequest mintRequest = HttpRequest.newBuilder()
                     .uri(URI.create("https://mp.speechmatics.com/v1/api_keys?type=rt"))
@@ -206,44 +229,21 @@ public class SttController {
                     .POST(HttpRequest.BodyPublishers.ofString(
                             "{\"ttl\": " + TOKEN_TTL_SECONDS + "}"))
                     .build();
-
             HttpResponse<String> mintResponse =
                     httpClient.send(mintRequest, HttpResponse.BodyHandlers.ofString());
-
             if (mintResponse.statusCode() < 200 || mintResponse.statusCode() >= 300) {
-                System.err.println("[STT] Speechmatics mint failed: HTTP "
-                        + mintResponse.statusCode() + " " + mintResponse.body());
-                String detail = mintResponse.statusCode() == 401
-                        ? "Speechmatics API key is invalid or expired"
-                        : mintResponse.statusCode() == 429
-                            ? "Speechmatics quota exhausted"
-                            : "Speech service temporarily unavailable";
-                return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                        .body(Map.of("error", detail));
+                System.err.println("[STT] Speechmatics mint failed: HTTP " + mintResponse.statusCode());
+                return null;
             }
-
-            JsonNode json = mapper.readTree(mintResponse.body());
-            String tempKey = json.path("key_value").asText("");
-            if (tempKey.isEmpty()) {
+            String key = mapper.readTree(mintResponse.body()).path("key_value").asText("");
+            if (key.isEmpty()) {
                 System.err.println("[STT] Speechmatics mint response missing key_value");
-                return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                        .body(Map.of("error", "Speech service temporarily unavailable"));
+                return null;
             }
-
-            Map<String, Object> body = new java.util.HashMap<>();
-            body.put("key", tempKey);
-            body.put("expiresIn", TOKEN_TTL_SECONDS);
-            String deepgramToken = deepgramNow.join();
-            if (deepgramToken != null) body.put("deepgramToken", deepgramToken);
-
-            System.out.println("[STT] Issued temporary SM token (ttl=" + TOKEN_TTL_SECONDS
-                    + "s)" + (deepgramToken != null ? " + Deepgram token" : "") + " to " + identity);
-            return ResponseEntity.ok(body);
-
+            return key;
         } catch (Exception e) {
-            System.err.println("[STT] Speechmatics mint error: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .body(Map.of("error", "Speech service temporarily unavailable"));
+            System.err.println("[STT] Speechmatics mint error: " + e.getClass().getSimpleName());
+            return null;
         }
     }
 
