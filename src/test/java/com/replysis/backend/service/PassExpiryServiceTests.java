@@ -28,6 +28,8 @@ class PassExpiryServiceTests {
         Map<String, Object> u = PassExpiryService.balanceAfterEnd("pass", 100, true);
         assertEquals(350L, u.get("credits"));
         assertEquals(60, u.get("audioMinutesAllowance"));
+        assertEquals(0L, u.get("creditsUsed"), "the Practice month is spent before the packs");
+        assertEquals(0L, u.get("audioMinutesUsed"));
     }
 
     @Test

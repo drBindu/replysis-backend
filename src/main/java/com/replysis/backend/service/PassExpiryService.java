@@ -56,6 +56,10 @@ public class PassExpiryService {
         if (practiceActive) {
             u.put("credits", purchased + FirestoreCreditsService.PRACTICE_CREDITS_INDIA);
             u.put("audioMinutesAllowance", FirestoreCreditsService.PRACTICE_AUDIO_MINUTES_INDIA);
+            // The month's counters start again with the Practice month: left at the paid month's total, every answer
+            // was taken from the bought packs instead.
+            u.put("creditsUsed", 0L);
+            u.put("audioMinutesUsed", 0L);
             return u;
         }
         u.put("credits", purchased);
