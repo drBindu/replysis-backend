@@ -22,4 +22,22 @@ class NothingAskedBillingTests {
         assertFalse(InterviewController.opensWithNothingAsked(""));
         assertFalse(InterviewController.opensWithNothingAsked(null));
     }
+
+    @Test
+    void freeNothingAskedReadsAreCappedPerPersonPerHour() {
+        long t = 1_000L * 3_600_000L;
+        for (int i = 0; i < InterviewController.NOTHING_ASKED_FREE_PER_HOUR; i++)
+            assertTrue(InterviewController.nothingAskedFreeAllowed("u:cap-test", t));
+        assertFalse(InterviewController.nothingAskedFreeAllowed("u:cap-test", t));
+        assertTrue(InterviewController.nothingAskedFreeAllowed("u:cap-test", t + 3_600_000L), "a new hour starts again");
+        assertTrue(InterviewController.nothingAskedFreeAllowed("u:someone-else", t));
+    }
+
+    @Test
+    void aPersonLeavingIsToldApartFromAProviderFailure() {
+        class ClientAbortException extends java.io.IOException {}
+        assertTrue(InterviewController.clientLeft(new RuntimeException(new ClientAbortException())));
+        assertFalse(InterviewController.clientLeft(new java.io.IOException("provider stream reset")));
+        assertFalse(InterviewController.clientLeft(new java.net.http.HttpTimeoutException("timed out")));
+    }
 }

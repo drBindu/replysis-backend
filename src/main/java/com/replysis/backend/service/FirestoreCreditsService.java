@@ -564,8 +564,17 @@ public class FirestoreCreditsService {
     }
 
     public void refundCredits(String uid, int cost, UsageEventService.Context context) {
+        refundCredits(uid, cost, context, true);
+    }
+
+    /**
+     * @param countsAsFailure false when the person left before the answer reached them (pressed Space, closed the app):
+     *                        still refunded, but not counted toward the "answers are failing" email, which three ordinary
+     *                        cancels in ten minutes used to send.
+     */
+    public void refundCredits(String uid, int cost, UsageEventService.Context context, boolean countsAsFailure) {
         if (cost <= 0) return;
-        noteRefund(context);
+        if (countsAsFailure) noteRefund(context);
         try {
             Firestore db = FirestoreClient.getFirestore();
             DocumentReference ref = db.collection("users").document(uid);
@@ -738,8 +747,13 @@ public class FirestoreCreditsService {
     }
 
     public void refundGuestCredits(String deviceId, int cost, UsageEventService.Context context) {
+        refundGuestCredits(deviceId, cost, context, true);
+    }
+
+    /** As refundCredits with countsAsFailure. */
+    public void refundGuestCredits(String deviceId, int cost, UsageEventService.Context context, boolean countsAsFailure) {
         if (cost <= 0) return;
-        noteRefund(context);
+        if (countsAsFailure) noteRefund(context);
         try {
             Firestore db = FirestoreClient.getFirestore();
             DocumentReference ref = db.collection(ANON_COLLECTION).document(deviceId);

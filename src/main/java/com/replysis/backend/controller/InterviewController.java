@@ -239,7 +239,12 @@ public class InterviewController {
     @GetMapping("/credits")
     public ResponseEntity<?> getCredits(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
-            @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            HttpServletRequest request) {
+        // Each call reads the database three times, and for a new device id writes it: limited so a loop cannot run up
+        // the bill. Far above what any app polls.
+        if (!rateLimiter.tryAcquire("credits-get-ip:" + rateLimiter.clientIp(request), 120, 60_000L))
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "60").build();
 
         RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
         if (identity == null)
@@ -450,7 +455,7 @@ public class InterviewController {
                                 ? creditsService.deductGuestCredits(identity.deviceId(),
                                         ANSWER_COST, answerUsage)
                                 : creditsService.deductCredits(identity.uid(),
-                                        ANSWER_COST, answerUsage));
+                                        ANSWER_COST, answerUsage), CHARGE_POOL);
 
         // 7. Stream response
         final com.replysis.backend.security.AppInfo companionApp = com.replysis.backend.security.AppInfo.current();
@@ -475,6 +480,7 @@ public class InterviewController {
             // the charge did. It still completes: the person was billed for an answer that never came and
             // no code refunded it. The finally block settles that case.
             boolean chargeObserved = false;
+            final boolean[] clientLeft = {false};   // the person went away before the answer reached them
             try {
                 var messages = aiMessages;   // effectively final — captured from above
 
@@ -514,8 +520,8 @@ public class InterviewController {
                 if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
                 if (!charged) {
                     // Same shape as every other failure on this stream, and
-                    // no escaping to get wrong.
-                    outputStream.write(friendlyErrorEvent().getBytes());
+                    // no escaping to get wrong. A refused charge says so; only a charge that never answered is a fault.
+                    outputStream.write((chargeObserved ? noAnswersLeftEvent() : friendlyErrorEvent()).getBytes());
                     outputStream.flush();
                     return;
                 }
@@ -544,7 +550,10 @@ public class InterviewController {
                 // A 5xx is different: it is usually a moment of trouble at the
                 // provider, and the same model a second later often works. That
                 // keeps its backoff.
-                if (response.statusCode() >= 500) {
+                // With a backup configured, a 5xx goes straight to it: waiting and asking the failing model again put
+                // up to eight seconds of silence in front of every answer during a provider incident. The same model
+                // is retried only when there is nothing else to ask.
+                if (response.statusCode() >= 500 && (fallbackApiKey == null || fallbackApiKey.isBlank())) {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", retrying in " + waitMs + "ms");
@@ -561,6 +570,7 @@ public class InterviewController {
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", falling back to " + fallbackProvider + "/" + fallbackModel);
+                    try { response.body().close(); } catch (Exception ignored) { /* already closed */ }
                     response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
                 }
 
@@ -592,6 +602,7 @@ public class InterviewController {
                         answerDelivered = streamUnlessRefused(retry, outputStream, answerTokens);
                 }
             } catch (Exception e) {
+                clientLeft[0] = clientLeft(e);
                 System.err.println("Stream error: " + e.getMessage());
                 try {
                     outputStream.write(friendlyErrorEvent().getBytes());
@@ -610,9 +621,9 @@ public class InterviewController {
                 // there was one: see chargeTaken above.
                 if (chargeTaken && (!providerAccepted || !answerDelivered)) {
                     if (identity.isGuest()) creditsService.refundGuestCredits(
-                            identity.deviceId(), ANSWER_COST, answerUsage);
+                            identity.deviceId(), ANSWER_COST, answerUsage, !clientLeft[0]);
                     else                    creditsService.refundCredits(
-                            identity.uid(), ANSWER_COST, answerUsage);
+                            identity.uid(), ANSWER_COST, answerUsage, !clientLeft[0]);
                 } else if (!chargeObserved) {
                     // Nothing was served, because the stream ended before the charge result was read. If that
                     // charge succeeds, whenever it does, give it back. Registered rather than waited for, so the
@@ -620,9 +631,9 @@ public class InterviewController {
                     chargeTask.whenComplete((ok, err) -> {
                         if (err == null && Boolean.TRUE.equals(ok)) {
                             if (identity.isGuest()) creditsService.refundGuestCredits(
-                                    identity.deviceId(), ANSWER_COST, answerUsage);
+                                    identity.deviceId(), ANSWER_COST, answerUsage, !clientLeft[0]);
                             else                    creditsService.refundCredits(
-                                    identity.uid(), ANSWER_COST, answerUsage);
+                                    identity.uid(), ANSWER_COST, answerUsage, !clientLeft[0]);
                         }
                     });
                 }
@@ -674,6 +685,7 @@ public class InterviewController {
     private static final int    MAX_STASHED_IMAGE_CHARS = 2_000_000;
     private static final int    MAX_STASHED_PER_IDENTITY = 4;
     private static final long   MAX_STASHED_TOTAL_BYTES = 60L * 1024 * 1024;
+    private static final long   MAX_STASHED_GUEST_BYTES = 8L * 1024 * 1024;
 
     // Words read off the screen by the app, sent instead of a picture when the connection cannot carry one.
     private static final int    MAX_SCREEN_TEXT_CHARS = 24_000;
@@ -796,6 +808,17 @@ public class InterviewController {
         if (held + entrySize > MAX_STASHED_TOTAL_BYTES)
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(Map.of("error", "too many screenshots held right now"));
+        // Guests together get a small share, so made-up device ids cannot fill the store and push signed-in people
+        // back to the slower inline upload.
+        if (identity.isGuest()) {
+            long guestsHold = stashedImages.values().stream()
+                    .filter(e -> e.owner().startsWith("guest:"))
+                    .mapToLong(StashedImage::size)
+                    .sum();
+            if (guestsHold + entrySize > MAX_STASHED_GUEST_BYTES)
+                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                        .body(Map.of("error", "too many screenshots held right now"));
+        }
 
         String id = java.util.UUID.randomUUID().toString();
         stashedImages.put(id, new StashedImage(identityKey(identity), image, screenWords,
@@ -1006,6 +1029,7 @@ public class InterviewController {
         final long[] screenTokens = new long[3];
         // Set when the model says there was nothing on the screen to answer, so that read is not charged.
         final boolean[] nothingAsked = new boolean[1];
+        final boolean[] screenClientLeft = {false};   // the person went away before the answer reached them
 
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
         // and a refund below if every vision provider fails.
@@ -1201,7 +1225,8 @@ public class InterviewController {
                 // retry once after a short backoff before giving up on this provider.
                 // Same reasoning as the answer path: a rate limit has nothing to
                 // wait for, a server error does.
-                if (response.statusCode() >= 500) {
+                // As on the answer path: with a backup, a 5xx goes straight to it below instead of waiting.
+                if (response.statusCode() >= 500 && (fallbackApiKey == null || fallbackApiKey.isBlank())) {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Vision provider " + provider + " returned HTTP "
                             + response.statusCode() + ", retrying in " + waitMs + "ms");
@@ -1233,6 +1258,7 @@ public class InterviewController {
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Vision provider " + provider + " returned HTTP " + response.statusCode()
                             + ", falling back to " + fallbackProvider);
+                    try { response.body().close(); } catch (Exception ignored) { /* already closed */ }
                     response = callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
                 }
 
@@ -1265,6 +1291,7 @@ public class InterviewController {
                         answerDelivered = streamUnlessRefused(retry, outputStream, screenTokens, nothingAsked);
                 }
             } catch (Exception e) {
+                screenClientLeft[0] = clientLeft(e);
                 System.err.println("Screen analysis stream error: " + e.getMessage());
                 try {
                     outputStream.write(friendlyErrorEvent().getBytes());
@@ -1279,6 +1306,11 @@ public class InterviewController {
                         screenTokens[2] > 0 ? screenTokens[2] - chargeStart : 0, System.currentTimeMillis() - chargeStart);
 
                 // No answer was delivered, or the screen held nothing to answer: return the up-front charge.
+                if (nothingAsked[0] && providerAccepted && answerDelivered
+                        && !nothingAskedFreeAllowed(identity.isGuest() ? "d:" + identity.deviceId() : "u:" + identity.uid(), System.currentTimeMillis())) {
+                    nothingAsked[0] = false;
+                    System.out.println("[SCREEN] Nothing asked, but this hour's free reads are used; charged.");
+                }
                 if (nothingAsked[0]) System.out.println("[SCREEN] Nothing on the screen to answer; not charged.");
                 if (!providerAccepted || !answerDelivered || nothingAsked[0]) {
                     // Labelled apart from a real failure: the admin counted "nothing to answer" as a failed answer
@@ -1287,9 +1319,9 @@ public class InterviewController {
                             ? new com.replysis.backend.service.UsageEventService.Context("screen_nothing", screenUsage.provider(), screenUsage.model(), screenUsage.eventId())
                             : screenUsage;
                     if (identity.isGuest()) creditsService.refundGuestCredits(
-                            identity.deviceId(), ANSWER_COST, refundUsage);
+                            identity.deviceId(), ANSWER_COST, refundUsage, !screenClientLeft[0]);
                     else                    creditsService.refundCredits(
-                            identity.uid(), ANSWER_COST, refundUsage);
+                            identity.uid(), ANSWER_COST, refundUsage, !screenClientLeft[0]);
                 }
             }
         };
@@ -1305,8 +1337,24 @@ public class InterviewController {
         String identityKey = identity.isGuest() ? "guest:" + identity.deviceId() : "user:" + identity.uid();
         String ip = rateLimiter.clientIp(request);
         return rateLimiter.tryAcquire(endpoint + ":ip:" + ip, PER_IP_PER_MINUTE, 60_000L)
-                && rateLimiter.tryAcquire(endpoint + ":identity:" + identityKey, PER_IDENTITY_PER_MINUTE, 60_000L);
+                && rateLimiter.tryAcquire(endpoint + ":identity:" + identityKey, PER_IDENTITY_PER_MINUTE, 60_000L)
+                // A guest's device id is whatever the caller says, and each new one came with a fresh free trial, so one
+                // address could take free answers forever. Guests are also held to a daily count per address.
+                && (!identity.isGuest()
+                    || rateLimiter.tryAcquire("guest-paid:ip:" + ip, GUEST_CALLS_PER_IP_PER_DAY, 86_400_000L));
     }
+
+    /**
+     * Charges run beside the model call. They were on the JVM's shared pool, a few threads on this server, so a burst of
+     * questions queued their charges and the answer waited on the queue. Its own threads; past them the caller charges.
+     */
+    private static final java.util.concurrent.ExecutorService CHARGE_POOL = new java.util.concurrent.ThreadPoolExecutor(
+            8, 64, 60, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>(),
+            r -> { Thread t = new Thread(r, "answer-charge"); t.setDaemon(true); return t; },
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
+
+    /** Free guest answers and screen reads one address gets a day, across every device id it sends. */
+    static final int GUEST_CALLS_PER_IP_PER_DAY = 30;
 
     private static String text(Object value, int maximumLength) {
         if (!(value instanceof String result)) return null;
@@ -1668,6 +1716,8 @@ public class InterviewController {
             // anyone who cut the connection after the first sentence got every answer free.
             if (released && delivered && contentChars >= INTERRUPTED_STILL_CHARGED_CHARS) {
                 System.out.println("[AI] Connection ended after " + contentChars + " characters had reached the person; counting it as delivered.");
+                if (contentChars > NOTHING_ASKED_MAX_CHARS && nothingAskedOut != null && nothingAskedOut.length > 0)
+                    nothingAskedOut[0] = false;
                 return true;
             }
             throw interrupted;
@@ -1682,7 +1732,38 @@ public class InterviewController {
             outputStream.flush();
             markFirstWords(tokensOut);
         }
+        // "Nothing asked" is free only when that is all the read said. A request worded to open with the marker and
+        // then answer something in full was a free answer every time.
+        if (contentChars > NOTHING_ASKED_MAX_CHARS && nothingAskedOut != null && nothingAskedOut.length > 0)
+            nothingAskedOut[0] = false;
         return delivered;
+    }
+
+    /** Longest read still treated as "nothing on the screen to answer" (the real ones are a short sentence). */
+    static final int NOTHING_ASKED_MAX_CHARS = 300;
+    /** Free "nothing asked" reads per person per hour; more than any real session makes, far fewer than a loop. */
+    static final int NOTHING_ASKED_FREE_PER_HOUR = 60;
+    private static final java.util.concurrent.ConcurrentHashMap<String, long[]> NOTHING_ASKED_COUNTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Counts one free "nothing asked" read for this person; false once the hour's allowance is used. */
+    static boolean nothingAskedFreeAllowed(String who, long now) {
+        if (NOTHING_ASKED_COUNTS.size() > 50_000) NOTHING_ASKED_COUNTS.clear();   // bounded memory, worst case a reset
+        long hour = now / 3_600_000L;
+        long[] slot = NOTHING_ASKED_COUNTS.compute(who, (k, v) -> v == null || v[0] != hour ? new long[]{hour, 1} : new long[]{hour, v[1] + 1});
+        return slot[1] <= NOTHING_ASKED_FREE_PER_HOUR;
+    }
+
+    /**
+     * Whether a stream ended because the person went away (Space, closing the app) rather than because a provider failed:
+     * the servlet container's own exceptions for writing to a closed connection, anywhere in the cause chain.
+     */
+    static boolean clientLeft(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
+            String n = t.getClass().getSimpleName();
+            if (n.equals("ClientAbortException") || n.equals("AsyncRequestNotUsableException") || n.equals("EofException")) return true;
+        }
+        return false;
     }
 
     /** The moment the first words left for the person, kept in slot 2 so the speed shown in admin is the real wait. */
@@ -2032,8 +2113,8 @@ public class InterviewController {
             // to the model anyway.
             System.out.println("[SCREEN_READ] pointerFixApplied=" + !fixed.equals(raw)
                     + " chars=" + raw.length());
-            System.out.println("[SCREEN_READ] extract: "
-                    + raw.replace('\n', '|').substring(0, Math.min(700, raw.length())));
+            // What the screen said is never logged: it held customers' calls, emails and names (2026-11-04).
+            System.out.println("[SCREEN_READ] extract lines=" + raw.lines().count());
 
             return fixed;
         } catch (Exception e) {
@@ -2198,7 +2279,8 @@ public class InterviewController {
         var future = new java.util.concurrent.CompletableFuture<String>();
         boolean haveKey = (geminiApiKey != null && !geminiApiKey.isBlank())
                 || (words != null && cerebrasApiKey != null && !cerebrasApiKey.isBlank());
-        if (!haveKey || !rateLimiter.tryAcquire("screen-preread:identity:" + identityKey(identity),
+        // Guests get no read ahead: their ids are free to make, and these reads share four threads with every real question.
+        if (!haveKey || identity.isGuest() || !rateLimiter.tryAcquire("screen-preread:identity:" + identityKey(identity),
                 SCREEN_PREREAD_PER_MINUTE, 60_000L)) {
             future.complete(null);
             return future;
@@ -2606,6 +2688,12 @@ public class InterviewController {
         return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
 
+    /** A charge refused for want of answers: said plainly, not as a fault. No purchase wording (the iPhone app shows it). */
+    private String noAnswersLeftEvent() throws Exception {
+        var chunk = Map.of("error", "You have no answers left.");
+        return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
+    }
+
     /**
      * The same event, but saying which wall was hit and for how long.
      *
@@ -2637,9 +2725,7 @@ public class InterviewController {
         if (seconds < 15) seconds = 30;   // no usable header: a fair middle estimate
 
         var chunk = Map.of("error",
-                "This minute's AI allowance is used up. Nothing is broken — it refills every "
-                + "minute. Wait about " + seconds + " seconds and ask again. Reading a screen costs "
-                + "far more than a spoken question, so screen answers run out first.");
+                "Answers are busy for a moment. Please wait about " + seconds + " seconds and ask again.");
         return "data: " + mapper.writeValueAsString(chunk) + "\n\n";
     }
 

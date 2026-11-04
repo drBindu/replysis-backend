@@ -84,7 +84,11 @@ public class UsageController {
     @GetMapping("/listening")
     public ResponseEntity<?> getListening(
             @RequestHeader(value = "Authorization", required = false) String authHeader,
-            @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            HttpServletRequest request) {
+        // Each call reads, and for a new device id writes, the database: limited so a loop cannot run up the bill.
+        if (!rateLimiter.tryAcquire("listening-get-ip:" + rateLimiter.clientIp(request), 120, 60_000L))
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", "60").build();
 
         RequestIdentity identity = identityResolver.resolve(authHeader, deviceId);
         if (identity == null)

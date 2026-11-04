@@ -49,9 +49,9 @@ class AnswerBillingTests {
         result.getBody().writeTo(new ByteArrayOutputStream());
         verify(credits, timeout(1000)).deductGuestCredits(eq("test-device"), anyInt(), any());
         if (allowed && (responseBody == null || responseBody.isEmpty())) {
-            verify(credits, timeout(1000).times(1)).refundGuestCredits(eq("test-device"), anyInt(), any());
+            verify(credits, timeout(1000).times(1)).refundGuestCredits(eq("test-device"), anyInt(), any(), anyBoolean());
         } else {
-            verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any());
+            verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any(), anyBoolean());
         }
         verify(credits, times(1)).deductGuestCredits(eq("test-device"), anyInt(), any());
         if (allowed && "".equals(responseBody))
@@ -110,7 +110,7 @@ class AnswerBillingTests {
         result.getBody().writeTo(new WalksAway(maxWrites));
         verify(credits, timeout(1000)).deductGuestCredits(eq("test-device"), anyInt(), any());
         Thread.sleep(300);
-        if (refundExpected) verify(credits, times(1)).refundGuestCredits(eq("test-device"), anyInt(), any());
-        else verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any());
+        if (refundExpected) verify(credits, times(1)).refundGuestCredits(eq("test-device"), anyInt(), any(), anyBoolean());
+        else verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any(), anyBoolean());
     }
 }
