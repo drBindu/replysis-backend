@@ -82,7 +82,12 @@ public class PassExpiryService {
                 // The end date leaves the account here, whatever happened to it. Ended accounts that kept it filled this
                 // page, oldest first, so past 100 of them no newer trial would ever have been ended.
                 if (!timed(doc.getString("planSource"))) {
-                    ref.update("passExpiresAt", FieldValue.delete()).get(15, TimeUnit.SECONDS);
+                    // Only if the account is unchanged since the read: a month bought in between writes planSource "pass"
+                    // and a new end date, and deleting that end date would let the month run forever.
+                    try {
+                        ref.update(com.google.cloud.firestore.Precondition.updatedAt(doc.getUpdateTime()),
+                                "passExpiresAt", FieldValue.delete()).get(15, TimeUnit.SECONDS);
+                    } catch (Exception changed) { /* changed since the read: the next run looks again */ }
                     continue;
                 }
                 db.runTransaction(tx -> {

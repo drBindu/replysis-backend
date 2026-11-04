@@ -557,6 +557,7 @@ public class InterviewController {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", retrying in " + waitMs + "ms");
+                    try { response.body().close(); } catch (Exception ignored) { /* already closed */ }
                     Thread.sleep(waitMs);
                     response = callAiProvider(endpoint, apiKey, model, messages);
                 } else if (response.statusCode() == 429) {
@@ -1230,6 +1231,7 @@ public class InterviewController {
                     long waitMs = retryDelayMs(response);
                     System.err.println("Vision provider " + provider + " returned HTTP "
                             + response.statusCode() + ", retrying in " + waitMs + "ms");
+                    try { response.body().close(); } catch (Exception ignored) { /* already closed */ }
                     Thread.sleep(waitMs);
                     response = callVisionProvider(endpoint, apiKey, model, messages);
                 }
@@ -1307,7 +1309,7 @@ public class InterviewController {
 
                 // No answer was delivered, or the screen held nothing to answer: return the up-front charge.
                 if (nothingAsked[0] && providerAccepted && answerDelivered
-                        && !nothingAskedFreeAllowed(identity.isGuest() ? "d:" + identity.deviceId() : "u:" + identity.uid(), System.currentTimeMillis())) {
+                        && !nothingAskedFreeAllowed(identityKey(identity), System.currentTimeMillis())) {
                     nothingAsked[0] = false;
                     System.out.println("[SCREEN] Nothing asked, but this hour's free reads are used; charged.");
                 }
@@ -1334,10 +1336,9 @@ public class InterviewController {
     // ── Helper: build the provider-specific vision "messages" array ──────────
     // OpenAI supports the "detail" field on image_url; Groq's vision API rejects it.
     private boolean allowExpensiveRequest(RequestIdentity identity, HttpServletRequest request, String endpoint) {
-        String identityKey = identity.isGuest() ? "guest:" + identity.deviceId() : "user:" + identity.uid();
         String ip = rateLimiter.clientIp(request);
         return rateLimiter.tryAcquire(endpoint + ":ip:" + ip, PER_IP_PER_MINUTE, 60_000L)
-                && rateLimiter.tryAcquire(endpoint + ":identity:" + identityKey, PER_IDENTITY_PER_MINUTE, 60_000L)
+                && rateLimiter.tryAcquire(endpoint + ":identity:" + identityKey(identity), PER_IDENTITY_PER_MINUTE, 60_000L)
                 // A guest's device id is whatever the caller says, and each new one came with a fresh free trial, so one
                 // address could take free answers forever. Guests are also held to a daily count per address.
                 && (!identity.isGuest()

@@ -149,12 +149,15 @@ public class AlertService {
             // Never mark a notice sent when nothing can send it: four signups were "claimed" before the email key existed
             // and so never emailed (2026-10-22).
             if (!isConfigured()) { record(now, "notice", key, subject, false); return; }
-            // Over budget: not claimed, so the next look sends it once the hour frees up rather than never.
+            // Claimed first, so the many repeat looks at a notice already sent (SignupAlertService sees each signup for ten
+            // minutes, once a minute) never use up the hourly budget.
+            if (!claimOnce(key, now)) return;
+            // Over budget: the claim is given back, so a later look sends it once the hour frees up rather than never.
             if (!withinCap(noticedAt, MAX_NOTICES_PER_HOUR, now)) {
+                unclaim(key);
                 System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + " (held: " + MAX_NOTICES_PER_HOUR + " notices this hour)");
                 return;
             }
-            if (!claimOnce(key, now)) return;
             boolean emailed = sender.send(to, subject, body);
             System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : " (email failed)"));
             // A failed send gives the claim back, so the next look tries again instead of the notice being lost.

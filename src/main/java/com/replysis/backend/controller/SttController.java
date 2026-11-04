@@ -190,7 +190,7 @@ public class SttController {
         // quota or key problem must not stop anyone listening while Deepgram is fine: it used to answer 503 or 502 before
         // the Deepgram token was even looked at (2026-11-04). Only when neither provider gives a token does the request fail.
         java.util.concurrent.CompletableFuture<String> deepgramNow =
-                java.util.concurrent.CompletableFuture.supplyAsync(this::mintDeepgramToken);
+                java.util.concurrent.CompletableFuture.supplyAsync(this::mintDeepgramToken, MINT_POOL);
         String tempKey = mintSpeechmaticsKey();
         String deepgramToken = deepgramNow.join();
 
@@ -213,6 +213,15 @@ public class SttController {
 
     /** Sent as "key" when Speechmatics gave no token but Deepgram did. Never a real key. */
     static final String SPEECHMATICS_UNAVAILABLE_KEY = "speech-backup-unavailable";
+
+    /**
+     * The Deepgram mint is a blocking HTTP call. On the JVM's shared pool (a few threads on this server) a burst of people
+     * starting to listen queued behind each other. Its own threads; past them the caller mints it.
+     */
+    private static final java.util.concurrent.ExecutorService MINT_POOL = new java.util.concurrent.ThreadPoolExecutor(
+            4, 32, 60, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>(),
+            r -> { Thread t = new Thread(r, "stt-mint"); t.setDaemon(true); return t; },
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
 
     /** A short-lived Speechmatics key, or null when it is not configured or refused. Never fails the request by itself. */
     private String mintSpeechmaticsKey() {

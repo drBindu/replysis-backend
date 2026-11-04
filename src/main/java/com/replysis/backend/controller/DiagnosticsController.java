@@ -80,7 +80,7 @@ public class DiagnosticsController {
         // Reports need no sign in, so one address could send five and email the owner. The email waits until reports
         // come from at least two addresses inside the window: one computer looping is in admin, not in the inbox.
         if (alerts != null && isRealError(type) && fromSeveralAddresses(ip, System.currentTimeMillis())) {
-            alerts.noteFailure("app-errors", 5, 10 * 60_000L, "Replysis: apps are reporting errors",
+            alerts.noteFailure("app-errors", 5, ALERT_WINDOW_MS, "Replysis: apps are reporting errors",
                     "Desktop apps are reporting errors on customers' computers.\n\nThe latest: version " + version + ", " + type
                             + (message.isEmpty() ? "" : " (" + message + ")") + ".\n\n"
                             + "Look: https://replysis.com/admin (Live panel, Problems).");
@@ -88,10 +88,6 @@ public class DiagnosticsController {
         return ResponseEntity.noContent().build();
     }
 
-    /**
-     * Whether a report means something broke. A customer out of free answers, or a hiding report for a dropdown, is shown in
-     * admin but is not an error: one trial customer with no answers left set off "apps are reporting errors" (2026-11-01).
-     */
     private static final long ALERT_WINDOW_MS = 10 * 60_000L;
     private final java.util.ArrayDeque<Object[]> recentErrorAddresses = new java.util.ArrayDeque<>();
 
@@ -104,6 +100,10 @@ public class DiagnosticsController {
         return recentErrorAddresses.stream().map(e -> e[1]).distinct().count() >= 2;
     }
 
+    /**
+     * Whether a report means something broke. A customer out of free answers, or a hiding report for a dropdown, is shown in
+     * admin but is not an error: one trial customer with no answers left set off "apps are reporting errors" (2026-11-01).
+     */
     static boolean isRealError(String type) {
         String t = type == null ? "" : type.toLowerCase(java.util.Locale.ROOT);
         return !(t.contains("nocredits") || t.contains("free-answers") || t.contains("trial") || t.contains("upgrade")
