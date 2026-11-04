@@ -11,9 +11,12 @@ import java.io.IOException;
 public class AdminOnlyFilter extends OncePerRequestFilter {
 
     private final String adminUid;
+    private final String adminEmail;
 
-    public AdminOnlyFilter(String adminUid) {
+    /** The owner is ADMIN_FIREBASE_UID when set, otherwise ADMIN_EMAIL, as the rest of the backend uses. */
+    public AdminOnlyFilter(String adminUid, String adminEmail) {
         this.adminUid = adminUid;
+        this.adminEmail = adminEmail;
     }
 
     @Override
@@ -30,13 +33,10 @@ public class AdminOnlyFilter extends OncePerRequestFilter {
         }
 
         // With no admin set, nobody is the admin: closed, rather than a server error.
-        if (adminUid == null || adminUid.isBlank()) {
-            response.setStatus(403);
-            response.getWriter().write("Forbidden");
-            return;
-        }
-
-        if (!adminUid.equals(user.uid())) {
+        boolean byUid = adminUid != null && !adminUid.isBlank() && adminUid.equals(user.uid());
+        boolean byEmail = (adminUid == null || adminUid.isBlank()) && adminEmail != null && !adminEmail.isBlank()
+                && user.email() != null && adminEmail.trim().equalsIgnoreCase(user.email());
+        if (!byUid && !byEmail) {
             response.setStatus(403);
             response.getWriter().write("Forbidden");
             return;

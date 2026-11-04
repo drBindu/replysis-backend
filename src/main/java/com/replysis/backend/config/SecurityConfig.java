@@ -36,10 +36,11 @@ public class SecurityConfig {
      */
     @Bean
     public FilterRegistrationBean<AdminOnlyFilter> adminOnlyFilterRegistration(
-            @Value("${ADMIN_FIREBASE_UID:}") String adminUid
+            @Value("${ADMIN_FIREBASE_UID:}") String adminUid,
+            @Value("${ADMIN_EMAIL:}") String adminEmail
     ) {
         FilterRegistrationBean<AdminOnlyFilter> reg = new FilterRegistrationBean<>();
-        reg.setFilter(new AdminOnlyFilter(adminUid));
+        reg.setFilter(new AdminOnlyFilter(adminUid, adminEmail));
         reg.addUrlPatterns("/admin-api/*");
         reg.setOrder(2);
         return reg;
