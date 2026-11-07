@@ -2291,6 +2291,10 @@ public class InterviewController {
             preReadPool.execute(() -> {
                 long t0 = System.currentTimeMillis();
                 try {
+                    // The app sends the screen ahead all the time while listening. An account that cannot pay for a screen
+                    // answer would otherwise get a paid model read every ten seconds for nothing. Checked here, off the
+                    // request, so sending the screen is never slower.
+                    if (!mayReadAhead(identity.uid())) { future.complete(null); return; }
                     String read = image != null
                             ? readScreen(GEMINI_ENDPOINT, geminiApiKey, VISION_MODEL_GEMINI, List.of(image), GENERIC_ASKED)
                             : readScreenText(words, GENERIC_ASKED);
@@ -2313,6 +2317,32 @@ public class InterviewController {
             future.complete(null);
         }
         return future;
+    }
+
+    // Whether an account can pay for a screen answer, remembered for a minute so a read ahead costs at most one balance
+    // lookup a minute. A failed lookup allows it: a paying person must never lose the faster answer to a database hiccup.
+    private static final long READ_AHEAD_CHECK_MS = 60_000L;
+    private final java.util.Map<String, long[]> readAheadAllowed = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private boolean mayReadAhead(String uid) {
+        long now = System.currentTimeMillis();
+        long[] known = readAheadAllowed.get(uid);
+        if (known != null && known[0] > now) return known[1] == 1;
+        boolean allowed;
+        try {
+            allowed = canPayForScreenAnswer(creditsService.getCredits(uid), ANSWER_COST);
+        } catch (Exception e) {
+            allowed = true;
+        }
+        if (readAheadAllowed.size() > 20_000) readAheadAllowed.clear();
+        readAheadAllowed.put(uid, new long[] { now + READ_AHEAD_CHECK_MS, allowed ? 1 : 0 });
+        return allowed;
+    }
+
+    /** True when the balance covers one screen answer: answers left, bought minutes, or an unlimited plan. */
+    static boolean canPayForScreenAnswer(com.replysis.backend.service.FirestoreCreditsService.UserCredits c, int cost) {
+        if (c == null) return true;
+        return c.isUnlimited || c.credits >= cost || c.minutesBalance > 0;
     }
 
     /** Stage one for this question: the read that was started ahead if there is one, otherwise a fresh one. */
