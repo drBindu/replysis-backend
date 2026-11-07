@@ -1053,6 +1053,8 @@ public class InterviewController {
                     companionApp == null ? null : companionApp.platform(), companionQuestion, "screen", rawOut);
             boolean providerAccepted = false;
             boolean answerDelivered = false;
+            java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> earlyVision = null;
+            boolean earlyVisionUsed = false;
             try {
                 // Reading the screen and writing the code are different jobs.
                 //
@@ -1074,6 +1076,20 @@ public class InterviewController {
                 // other for one.
                 String screenRead;
                 final long answerStart = System.currentTimeMillis();
+                // The picture answer is started beside the screen read instead of after it. On a screen with no coding
+                // problem the read only says so and is thrown away, and the picture answer started after it (measured
+                // 2026-11-07: 1.4 to 3 s of read, then the answer). Now both run at once; whichever path the read picks,
+                // the other call is closed. A read finished ahead of the question needs no such start.
+                if (!textMode && looksLikeCoding(finalPrompt) && !preReadDone(takenEntries)) {
+                    final List<Map<String, Object>> early = buildVisionMessages(finalImages, finalPrompt);
+                    earlyVision = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return raceVision(endpoint, apiKey, model, fallbackEndpoint, fallbackApiKey, fallbackModel, early);
+                        } catch (Exception e) {
+                            throw new java.util.concurrent.CompletionException(e);
+                        }
+                    }, com.replysis.backend.service.HedgedCall.pool());
+                }
                 try {
                     screenRead = obtainScreenRead(textMode, screenWords, endpoint, apiKey, model,
                             finalImages, finalPrompt, takenEntries);
@@ -1206,21 +1222,18 @@ public class InterviewController {
 
                 List<Map<String, Object>> messages = buildVisionMessages(finalImages, finalPrompt);
 
-                // Raced like a spoken answer: a vision call that stalls used to hold the person for up to 60 s before the
-                // backup was even tried (review, 2026-10-22). Normal replies take 1.3 to 3.6 s, so the backup is asked
-                // only after 5 s of silence, and whichever answers well first is used.
-                final List<Map<String, Object>> firstMessages = messages;
-                final boolean visionHedgeable = fallbackApiKey != null && !fallbackApiKey.isBlank();
-                HttpResponse<java.io.InputStream> response = com.replysis.backend.service.HedgedCall.race(
-                        () -> callVisionProvider(endpoint, apiKey, model, firstMessages),
-                        visionHedgeable ? () -> {
-                            System.out.println("[HEDGE] vision " + model + " silent for 5000 ms; also asking " + fallbackModel);
-                            return callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, firstMessages);
-                        } : null,
-                        5_000L,
-                        r -> r.statusCode() == 200,
-                        r -> { try { r.body().close(); } catch (Exception ignored) { /* already closed */ } },
-                        com.replysis.backend.service.HedgedCall.pool());
+                // The answer started beside the screen read, when there was one; otherwise started now.
+                HttpResponse<java.io.InputStream> response = null;
+                if (earlyVision != null) {
+                    earlyVisionUsed = true;
+                    try {
+                        response = earlyVision.join();
+                    } catch (Exception early) {
+                        response = null;   // it failed to start: ask again below, as before
+                    }
+                }
+                if (response == null)
+                    response = raceVision(endpoint, apiKey, model, fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
 
                 // Rate limit / server error from the upstream provider is usually transient —
                 // retry once after a short backoff before giving up on this provider.
@@ -1300,6 +1313,9 @@ public class InterviewController {
                     outputStream.flush();
                 } catch (Exception ignored) {}
             } finally {
+                // The picture answer started beside the read and not needed (the coding path answered, or it ended early):
+                // closed, so the model stops writing and nothing is left open.
+                if (earlyVision != null && !earlyVisionUsed) discardEarlyVision(earlyVision);
                 outputStream.finish();   // the phone's copy of this answer is complete
                 // Vision is billed by token like everything else, so record it
                 // the same way and the portal can compare a screen read with an
@@ -2343,6 +2359,48 @@ public class InterviewController {
     static boolean canPayForScreenAnswer(com.replysis.backend.service.FirestoreCreditsService.UserCredits c, int cost) {
         if (c == null) return true;
         return c.isUnlimited || c.credits >= cost || c.minutesBalance > 0;
+    }
+
+    /**
+     * The single-stage picture answer, raced like a spoken one: a vision call that stalls used to hold the person for up
+     * to 60 s before the backup was even tried (review, 2026-10-22). Normal replies take 1.3 to 3.6 s, so the backup is
+     * asked only after 5 s of silence, and whichever answers well first is used.
+     */
+    private HttpResponse<java.io.InputStream> raceVision(String endpoint, String apiKey, String model,
+                                                         String fallbackEndpoint, String fallbackApiKey, String fallbackModel,
+                                                         List<Map<String, Object>> messages) throws Exception {
+        final boolean hedgeable = fallbackApiKey != null && !fallbackApiKey.isBlank();
+        return com.replysis.backend.service.HedgedCall.race(
+                () -> callVisionProvider(endpoint, apiKey, model, messages),
+                hedgeable ? () -> {
+                    System.out.println("[HEDGE] vision " + model + " silent for 5000 ms; also asking " + fallbackModel);
+                    return callVisionProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                } : null,
+                5_000L,
+                r -> r.statusCode() == 200,
+                InterviewController::closeQuietly,
+                com.replysis.backend.service.HedgedCall.pool());
+    }
+
+    /** True when the one screen sent ahead has already been read, so the read for this question costs nothing. */
+    private static boolean preReadDone(List<StashedImage> taken) {
+        return taken != null && taken.size() == 1 && readReady(taken.get(0).read());
+    }
+
+    /** A screen read that has finished with something in it. */
+    static boolean readReady(java.util.concurrent.CompletableFuture<String> read) {
+        if (read == null || !read.isDone() || read.isCompletedExceptionally()) return false;
+        String text = read.getNow(null);
+        return text != null && !text.isBlank();
+    }
+
+    /** Closes a picture answer started early and then not used, whenever it arrives. */
+    static void discardEarlyVision(java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> early) {
+        early.thenAccept(InterviewController::closeQuietly);
+    }
+
+    private static void closeQuietly(HttpResponse<java.io.InputStream> r) {
+        try { if (r != null) r.body().close(); } catch (Exception ignored) { /* already closed */ }
     }
 
     /** Stage one for this question: the read that was started ahead if there is one, otherwise a fresh one. */
