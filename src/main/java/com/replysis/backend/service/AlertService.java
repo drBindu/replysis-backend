@@ -62,6 +62,8 @@ public class AlertService {
     interface Sender { boolean send(String to, String subject, String body); }
 
     private Sender sender = this::sendByResend;
+    /** How a customer email leaves (from the product's own address). Replaced in tests. */
+    private Sender userSender = (recipient, subject, body) -> sendByResend(userFrom, recipient, subject, body);
     private LongSupplier clock = System::currentTimeMillis;
 
     private record Open(long openedAt, long lastSentAt) {}
@@ -89,10 +91,21 @@ public class AlertService {
         s.clock = clock;
         s.inline = true;
         s.to = "owner@example.com";
+        s.testClaims = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        return s;
+    }
+
+    /** For tests: as above, plus a capturing customer sender and an email key so customer mail is attempted. */
+    static AlertService forTest(Sender sender, Sender userSender, LongSupplier clock) {
+        AlertService s = forTest(sender, clock);
+        s.userSender = userSender;
+        s.resendKey = "test";
         return s;
     }
 
     private boolean inline = false;
+    /** Tests only: claims kept in memory, standing in for the _alerts collection. */
+    private java.util.Set<String> testClaims;
 
     // ------------------------------------------------------------------ raising and clearing
 
@@ -167,7 +180,7 @@ public class AlertService {
     }
 
     private boolean claimOnce(String key, long now) {
-        if (!firebaseEnabled) return true;
+        if (!firebaseEnabled) return testClaims == null || testClaims.add(key);
         try {
             FirestoreClient.getFirestore().collection("_alerts").document(key)
                     .create(Map.of("sentAt", now)).get(8, TimeUnit.SECONDS);
@@ -186,8 +199,11 @@ public class AlertService {
         long now = clock.getAsLong();
         run(() -> {
             if (!claimOnce(key, now)) return;
-            boolean sent = sendByResend(userFrom, recipient, subject, body);
+            boolean sent = userSender.send(recipient, subject, body);
             System.out.println("[MAIL] " + key + " to " + mask(recipient) + (sent ? " sent" : " failed"));
+            // A failed send gives the claim back, so the next look (a minute for the welcome, ten for a reminder) tries
+            // again: kept, a short mail service hiccup lost that customer's welcome or trial reminder for good.
+            if (!sent) unclaim(key);
         });
     }
 
@@ -244,7 +260,7 @@ public class AlertService {
     }
 
     private void unclaim(String key) {
-        if (!firebaseEnabled) return;
+        if (!firebaseEnabled) { if (testClaims != null) testClaims.remove(key); return; }
         try {
             FirestoreClient.getFirestore().collection("_alerts").document(key).delete().get(8, TimeUnit.SECONDS);
         } catch (Exception ignored) { /* stays claimed: the notice is recorded in alert_events either way */ }

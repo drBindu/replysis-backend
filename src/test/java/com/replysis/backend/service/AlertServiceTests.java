@@ -122,4 +122,19 @@ class AlertServiceTests {
         assertEquals("New Replysis signup: jo...@example.com", AlertService.maskEmails("New Replysis signup: jonathan@example.com"));
         assertEquals("nothing here", AlertService.maskEmails("nothing here"));
     }
+
+    @Test
+    void aCustomerEmailThatFailedToSendIsTriedAgainNotLost() {
+        List<String> toCustomers = new ArrayList<>();
+        boolean[] up = {false};
+        AlertService s = AlertService.forTest((to, subject, body) -> true,
+                (to, subject, body) -> { if (up[0]) toCustomers.add(subject); return up[0]; }, now::get);
+        s.toUserOnce("welcome-u1", "someone@example.com", "Welcome to Replysis", "Hi");
+        assertTrue(toCustomers.isEmpty(), "the mail service was down");
+        up[0] = true;
+        s.toUserOnce("welcome-u1", "someone@example.com", "Welcome to Replysis", "Hi");
+        assertEquals(List.of("Welcome to Replysis"), toCustomers, "the next look sends it");
+        s.toUserOnce("welcome-u1", "someone@example.com", "Welcome to Replysis", "Hi");
+        assertEquals(1, toCustomers.size(), "and never twice once it went out");
+    }
 }

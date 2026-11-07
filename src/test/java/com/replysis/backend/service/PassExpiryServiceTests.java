@@ -48,4 +48,12 @@ class PassExpiryServiceTests {
         assertEquals(25, FirestoreCreditsService.chargeCap("free", false, null));
         assertEquals(2500, FirestoreCreditsService.chargeCap("pro", true, null), "a paid plan keeps its own size");
     }
+
+    @Test
+    void theTrialReminderSkipsUnsubscribedAndTestAccounts() {
+        assertTrue(PassExpiryService.mayMarket(null, null));
+        assertTrue(PassExpiryService.mayMarket(false, false));
+        assertFalse(PassExpiryService.mayMarket(true, null), "pressed unsubscribe in an earlier email");
+        assertFalse(PassExpiryService.mayMarket(null, true), "the owner's own test account");
+    }
 }

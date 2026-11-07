@@ -40,6 +40,14 @@ public class PassExpiryService {
         return " " + name.trim().split("\\s+")[0];
     }
 
+    /**
+     * Whether the trial reminder may go to this account. It sells a plan, so it follows the website's emails: nobody who
+     * pressed unsubscribe, and not the owner's own test accounts (round 27, 2026-11-07: it went to both).
+     */
+    static boolean mayMarket(Boolean emailOptOut, Boolean internal) {
+        return !Boolean.TRUE.equals(emailOptOut) && !Boolean.TRUE.equals(internal);
+    }
+
     /** Plans that end at passExpiresAt: an India month paid once, or the 1 day trial every new account starts on. */
     static boolean timed(String planSource) {
         return "pass".equals(planSource) || "trial".equals(planSource);
@@ -146,6 +154,7 @@ public class PassExpiryService {
                     .limit(100).get().get(15, TimeUnit.SECONDS);
             for (QueryDocumentSnapshot doc : trialSoon.getDocuments()) {
                 if (!"trial".equals(doc.getString("planSource"))) continue;
+                if (!mayMarket(doc.getBoolean("emailOptOut"), doc.getBoolean("internal"))) continue;
                 String email = doc.getString("email");
                 String end = doc.getString("passExpiresAt");
                 if (email == null || end == null) continue;
