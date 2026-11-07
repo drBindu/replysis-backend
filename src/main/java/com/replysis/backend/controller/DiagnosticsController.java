@@ -107,8 +107,17 @@ public class DiagnosticsController {
     static boolean isRealError(String type) {
         String t = type == null ? "" : type.toLowerCase(java.util.Locale.ROOT);
         return !(t.contains("nocredits") || t.contains("free-answers") || t.contains("trial") || t.contains("upgrade")
-                || t.endsWith("-minor"));
+                || t.endsWith("-minor") || CUSTOMER_STATE.matcher(t).find());
     }
+
+    /**
+     * What Windows 1.0.52 and older send for a customer's own state, named by the banner's title (2026-11-07): out of
+     * answers ("alert-no-answers-left-this-month", "alert-you-have-0-answers-left"), the month's limit
+     * ("listening-nolisteningtime", "alert-you-have-reached-this-month-s-limit") and no microphone. Newer apps mark these
+     * "-minor" themselves. Two customers out of answers within ten minutes had been enough for an outage email.
+     */
+    private static final java.util.regex.Pattern CUSTOMER_STATE = java.util.regex.Pattern.compile(
+            "answers?-left|nolisteningtime|reached-this-month|no-microphone|nomicrophone");
 
     // The same cleaned fields, kept so the admin portal's Live panel can show a problem the moment it happens instead of
     // someone searching a server log afterwards. Never blocks the request and never fails it: a small bounded queue,

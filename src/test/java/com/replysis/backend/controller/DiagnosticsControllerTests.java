@@ -51,6 +51,21 @@ class DiagnosticsControllerTests {
     }
 
     @Test
+    void olderWindowsCustomerStatesDoNotEmailTheOwner() {
+        // Windows 1.0.52 and older name these by the banner title: a customer's own state, not an outage (2026-11-07).
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-no-answers-left-this-month"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-you-have-0-answers-left"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-you-have-1-answer-left"));
+        assertFalse(DiagnosticsController.isRealError("Problem.listening-NoListeningTime"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-you-have-reached-this-month-s-limit"));
+        assertFalse(DiagnosticsController.isRealError("Problem.no-microphone"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-no-microphone-on-this-computer"));
+        assertTrue(DiagnosticsController.isRealError("Problem.listening-NoSpeechService"));
+        assertTrue(DiagnosticsController.isRealError("Problem.alert-the-speech-service-is-busy"));
+        assertTrue(DiagnosticsController.isRealError("Problem.listening-SignInExpired"));
+    }
+
+    @Test
     void oneAddressAloneNeverRaisesTheErrorEmail() {
         DiagnosticsController c = new DiagnosticsController();
         long now = 10_000_000L;
