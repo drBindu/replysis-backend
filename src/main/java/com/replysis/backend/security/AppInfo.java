@@ -35,8 +35,27 @@ public record AppInfo(String platform, String version) {
         return new AppInfo(platform, VERSION.matcher(v).matches() ? v : "");
     }
 
+    /** Set while work for a request runs on another thread (see carriedTo), where there is no request to read. */
+    private static final ThreadLocal<AppInfo> CARRIED = new ThreadLocal<>();
+
+    /**
+     * The same work, run with this request's app attached. A charge done on a pool thread used to record its usage row with no
+     * platform or version, so every voice answer showed as an unknown app in the admin speed figures.
+     */
+    public static <T> java.util.function.Supplier<T> carriedTo(java.util.function.Supplier<T> work) {
+        final AppInfo app = current();
+        return () -> {
+            AppInfo before = CARRIED.get();
+            CARRIED.set(app);
+            try { return work.get(); }
+            finally { if (before == null) CARRIED.remove(); else CARRIED.set(before); }
+        };
+    }
+
     /** The app behind the request this thread is serving, or null outside a request or when it did not say. */
     public static AppInfo current() {
+        AppInfo carried = CARRIED.get();
+        if (carried != null) return carried;
         try {
             var attributes = RequestContextHolder.getRequestAttributes();
             if (!(attributes instanceof ServletRequestAttributes servlet)) return null;

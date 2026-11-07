@@ -450,12 +450,12 @@ public class InterviewController {
 
         long chargeStart = System.currentTimeMillis();
         java.util.concurrent.CompletableFuture<Boolean> chargeTask =
-                java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                java.util.concurrent.CompletableFuture.supplyAsync(com.replysis.backend.security.AppInfo.carriedTo(() ->
                         identity.isGuest()
                                 ? creditsService.deductGuestCredits(identity.deviceId(),
                                         ANSWER_COST, answerUsage)
                                 : creditsService.deductCredits(identity.uid(),
-                                        ANSWER_COST, answerUsage), CHARGE_POOL);
+                                        ANSWER_COST, answerUsage)), CHARGE_POOL);
 
         // 7. Stream response
         final com.replysis.backend.security.AppInfo companionApp = com.replysis.backend.security.AppInfo.current();
