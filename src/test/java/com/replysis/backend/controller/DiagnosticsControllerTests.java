@@ -73,4 +73,27 @@ class DiagnosticsControllerTests {
         assertTrue(c.fromSeveralAddresses("5.6.7.8", now + 20));
         assertFalse(new DiagnosticsController().fromSeveralAddresses("9.9.9.9", now), "a fresh window needs two addresses again");
     }
+
+    @Test
+    void olderWindowsInformationAndTypingMistakesDoNotEmailTheOwner() {
+        assertFalse(DiagnosticsController.isRealError("Problem.signin-incorrect-email-or-password"));
+        assertFalse(DiagnosticsController.isRealError("Problem.signin-no-account-found-with-this-email"));
+        assertFalse(DiagnosticsController.isRealError("Problem.signin-an-account-already-exists-with-this-email-sign-i"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-microphone-found"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-nothing-heard-yet"));
+        assertFalse(DiagnosticsController.isRealError("Problem.alert-your-minutes-are-almost-over"));
+        assertFalse(DiagnosticsController.isRealError("Problem.update-download-failed"));
+        // Real failures still alert.
+        assertTrue(DiagnosticsController.isRealError("Problem.signin-this-account-has-been-disabled"));
+        assertTrue(DiagnosticsController.isRealError("Problem.signin-google-sign-in-failed-please-try-again-or-contact-sup"));
+        assertTrue(DiagnosticsController.isRealError("Problem.update-install-failed"));
+    }
+
+    @Test
+    void theOlderAppSlugMatchesTheWindowsOne() {
+        assertEquals("an-account-already-exists-with-this-email-sign-i",
+                DiagnosticsController.olderAppSlug("An account already exists with this email. Sign in instead."));
+        assertEquals("login-failed-check-your-email-and-password",
+                DiagnosticsController.olderAppSlug("Login failed. Check your email and password."));
+    }
 }

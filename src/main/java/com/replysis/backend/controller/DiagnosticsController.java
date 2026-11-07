@@ -107,7 +107,39 @@ public class DiagnosticsController {
     static boolean isRealError(String type) {
         String t = type == null ? "" : type.toLowerCase(java.util.Locale.ROOT);
         return !(t.contains("nocredits") || t.contains("free-answers") || t.contains("trial") || t.contains("upgrade")
-                || t.endsWith("-minor") || CUSTOMER_STATE.matcher(t).find());
+                || t.endsWith("-minor") || CUSTOMER_STATE.matcher(t).find() || OLDER_APP_NOT_ERRORS.stream().anyMatch(t::endsWith));
+    }
+
+    /**
+     * Reports Windows 1.0.52 and older send for things that are not the app failing, by exact kind (2026-11-07, bug round 26).
+     * Newer apps mark them "-minor" or do not report them, but customers stay on old versions for weeks: a mistyped password,
+     * an update download that failed and three information banners each counted toward the outage email until then.
+     * Built with the old app's own slug (lower case, runs of other characters to one dash, cut at 48), so they match exactly.
+     */
+    static final java.util.List<String> OLDER_APP_NOT_ERRORS = java.util.stream.Stream.concat(
+            java.util.stream.Stream.of(
+                    "Please enter your email and password.",
+                    "No account found with this email.",
+                    "An account already exists with this email. Sign in instead.",
+                    "Use a password with at least 6 characters.",
+                    "Incorrect password. Please try again.",
+                    "Invalid email address.",
+                    "Incorrect email or password.",
+                    "Login failed. Check your email and password.",
+                    "Enter your email first, then click Forgot Password.")
+                    .map(m -> "signin-" + olderAppSlug(m)),
+            java.util.stream.Stream.of(
+                    "alert-" + olderAppSlug("Microphone found"),
+                    "alert-" + olderAppSlug("Nothing heard yet"),
+                    "alert-" + olderAppSlug("Your minutes are almost over"),
+                    "update-download-failed"))
+            .toList();
+
+    /** The Windows app's ClientErrorReporter.Slug, as 1.0.52 and older have it. */
+    static String olderAppSlug(String text) {
+        String t = (text == null ? "" : text.toLowerCase(java.util.Locale.ROOT)).replaceAll("[^a-z0-9]+", "-");
+        t = t.replaceAll("^-+|-+$", "");
+        return t.length() > 48 ? t.substring(0, 48) : t;
     }
 
     /**
