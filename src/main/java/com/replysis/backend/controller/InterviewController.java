@@ -2032,10 +2032,21 @@ public class InterviewController {
         }
     }
 
-    // What a screen read reports, in the six headings the answer stage works from. One template for a picture and
-    // for the words read off one, so the two cannot drift apart.
-    private static final String SCREEN_READ_TEMPLATE = """
+    // What a screen read reports, in the headings the answer stage works from. One template for a picture and for the
+    // words read off one, so the two cannot drift apart.
+    //
+    // KIND comes first so the coding or not decision is known at the read's first words (collectRead stops there on an
+    // ordinary screen). Measured 2026-11-08 on six made-up screens, four runs each: the old template, which put the
+    // verdict inside PROBLEM, called a case-study slide a coding problem 4 times of 4 (sending it the slow two-stage
+    // way) and a Python traceback not coding 4 of 4; with KIND first all 24 were right and the verdict arrived with the
+    // first words, 0.76 to 0.85 s.
+    static final String SCREEN_READ_TEMPLATE = """
                 Read this screen and report it. Do not solve anything, do not write code.
+
+                KIND: write exactly "coding" if the screen shows a programming problem, code, a code editor, a terminal,
+                a query to write, or a compile, test or runtime error. Otherwise write exactly "none: not a coding screen".
+                A case study, a business, behavioural or product question, or a system design question with no code to
+                write, is not coding.
 
                 The interviewer just asked: %s
 
@@ -2045,9 +2056,8 @@ public class InterviewController {
                 coding site, inside a chat or AI assistant page such as ChatGPT, in a
                 document, a slide or a picture. If several are listed, report the one
                 the interviewer's question points to, else the first one in full.
-                Only if no coding question, code or error is visible anywhere on the
-                screen (a desktop, a dashboard, an empty page), write "none: not a
-                coding screen" and say plainly what the screen actually is instead.
+                If KIND is not coding, write "none" and say plainly what the screen
+                actually is instead.
                 Never invent a problem to have one to report.
                 LANGUAGE: the language selected in the editor, or "none".
                 EXISTING CODE: the code currently in the editor, exactly as written,
@@ -2063,7 +2073,7 @@ public class InterviewController {
                 useless. If you cannot see it, it is not visible.
                 ASKED: repeat back the interviewer's question above, in one line.
 
-                Plain text under these six headings. Nothing else.
+                Plain text under these seven headings, KIND first. Nothing else.
                 """;
 
     /**

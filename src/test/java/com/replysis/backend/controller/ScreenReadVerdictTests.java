@@ -72,6 +72,32 @@ class ScreenReadVerdictTests {
         assertFalse(InterviewController.startPictureAnswerEarly(false, true, coding), "read ahead found code");
     }
 
+    @Test
+    void theVerdictIsTheFirstHeadingSoItArrivesWithTheFirstWords() {
+        String t = InterviewController.SCREEN_READ_TEMPLATE;
+        int kind = t.indexOf("KIND:"), problem = t.indexOf("PROBLEM:");
+        assertTrue(kind >= 0 && kind < problem, "KIND comes before PROBLEM");
+        assertTrue(t.substring(kind, problem).contains(InterviewController.NOT_CODING_MARKER),
+                "the not coding verdict is written under KIND");
+        assertFalse(t.substring(problem).contains(InterviewController.NOT_CODING_MARKER),
+                "PROBLEM does not repeat the marker, so a coding read can never trip it there");
+    }
+
+    @Test
+    void aKindVerdictStopsTheReadAndACodingKindDoesNot() throws Exception {
+        AtomicBoolean closed = new AtomicBoolean();
+        String ordinary = InterviewController.collectRead(
+                sse(closed, "KIND: none: not a ", "coding screen", " PROBLEM: none, a slide about churn"), TOKEN);
+        assertTrue(closed.get());
+        assertFalse(ordinary.contains("churn"), "stops at the verdict");
+        assertTrue(InterviewController.saysNotCoding(ordinary));
+
+        String coding = InterviewController.collectRead(
+                sse(new AtomicBoolean(), "KIND: coding", " PROBLEM: none", " ERROR: ZeroDivisionError on line 14"), TOKEN);
+        assertTrue(coding.contains("ZeroDivisionError"), "a coding read is read to the end");
+        assertFalse(InterviewController.saysNotCoding(coding));
+    }
+
     private static InterviewController.StashedImage stashed(String read) {
         return new InterviewController.StashedImage("u", "x", null, Long.MAX_VALUE,
                 java.util.concurrent.CompletableFuture.completedFuture(read));
