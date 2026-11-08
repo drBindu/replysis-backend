@@ -270,7 +270,7 @@ public class InterviewController {
         // "trial": the 1 day free trial runs on plan "pro"; apps show "Free trial", never "Pro" (owner, 2026-10-27).
         boolean trial = !identity.isGuest() && !"free".equalsIgnoreCase(credits.plan)
                 && QuestionController.trialActive(identity.uid());
-        return ResponseEntity.ok(Map.of(
+        Map<String, Object> reply = new java.util.HashMap<>(Map.of(
                 "credits",        reported,
                 "creditsReal",    credits.credits,
                 "plan",           credits.plan,
@@ -279,6 +279,9 @@ public class InterviewController {
                 "isUnlimited",    credits.isUnlimited,
                 "minutesBalance", minutesShown
         ));
+        // When the answers refresh, so the apps stop guessing the 1st of next month (round 38). Older apps ignore it.
+        if (credits.refreshesAt != null) reply.put("refreshesAt", credits.refreshesAt);
+        return ResponseEntity.ok(reply);
     }
 
     // ── POST /api/v1/interview/ask ───────────────────────────────────────────

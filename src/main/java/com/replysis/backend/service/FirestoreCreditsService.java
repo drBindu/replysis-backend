@@ -401,9 +401,16 @@ public class FirestoreCreditsService {
                             "creditsUsed", 0,
                             "audioMinutesUsed", 0,
                             "creditsResetDate", nextResetDate());
+                    resetAt = Instant.parse(nextResetDate());
                 }
 
-                return new UserCredits(safeInt(credits), plan, false, minutes);
+                // Read loosely: a field of an unexpected type must never fail the balance itself.
+                Object rawEnd = snap.get("stripeCurrentPeriodEnd");
+                Long periodEnd = rawEnd instanceof Number n ? n.longValue() : null;
+                Object rawSub = snap.get("stripeSubscriptionId"), rawInterval = snap.get("stripeBillingInterval");
+                String shown = refreshShown(rawSub instanceof String v ? v : null, rawInterval instanceof String v ? v : null,
+                        periodEnd, resetAt == null ? null : resetAt.toString(), Instant.now());
+                return new UserCredits(safeInt(credits), plan, false, minutes, shown);
             }).get();
         } catch (Exception e) {
             System.err.println("Firestore getCredits error: " + describe(e));
@@ -906,6 +913,19 @@ public class FirestoreCreditsService {
         return fields;
     }
 
+    /**
+     * The date a paid account's answers refresh, as shown to the customer (bug round 38, 2026-11-07). The same rule as the
+     * website's app/lib/refresh-date.ts: a monthly subscription refills on its renewal day (stripeCurrentPeriodEnd, in
+     * seconds), while creditsResetDate sits three days later as a safety margin; everything else refills on creditsResetDate.
+     */
+    static String refreshShown(String subscriptionId, String interval, Long periodEndSeconds, String resetDate, Instant now) {
+        if (subscriptionId != null && !subscriptionId.isBlank() && "monthly".equals(interval)
+                && periodEndSeconds != null && Instant.ofEpochSecond(periodEndSeconds).isAfter(now)) {
+            return Instant.ofEpochSecond(periodEndSeconds).toString();
+        }
+        return resetDate;
+    }
+
     private static String nextResetDate() {
         return ZonedDateTime.now(ZoneOffset.UTC)
                 .plusMonths(1)
@@ -930,11 +950,19 @@ public class FirestoreCreditsService {
             this(credits, plan, isUnlimited, 0);
         }
 
+        /** When the answers refresh, as the customer should be told (refreshShown), or null when unknown. */
+        public final String refreshesAt;
+
         public UserCredits(int credits, String plan, boolean isUnlimited, int minutesBalance) {
+            this(credits, plan, isUnlimited, minutesBalance, null);
+        }
+
+        public UserCredits(int credits, String plan, boolean isUnlimited, int minutesBalance, String refreshesAt) {
             this.credits = credits;
             this.plan = plan;
             this.isUnlimited = isUnlimited;
             this.minutesBalance = minutesBalance;
+            this.refreshesAt = refreshesAt;
         }
     }
 }

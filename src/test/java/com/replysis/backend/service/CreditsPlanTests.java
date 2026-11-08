@@ -127,4 +127,18 @@ class CreditsPlanTests {
         assertEquals(0, purchasedAfterSpendingItAll);
         assertEquals(2_500, FirestoreCreditsService.creditsAfterReset("pro", 0, purchasedAfterSpendingItAll));
     }
+
+    // Round 38: a monthly subscription refreshes on its renewal day, not three days later (the stored margin date).
+    @Test
+    void theRefreshShownIsTheRenewalDayForAMonthlySubscription() {
+        java.time.Instant now = java.time.Instant.parse("2026-11-20T00:00:00Z");
+        long renewal = java.time.Instant.parse("2026-12-15T10:00:00Z").getEpochSecond();
+        String margin = "2026-12-18T10:00:00Z";
+        assertEquals("2026-12-15T10:00:00Z", FirestoreCreditsService.refreshShown("sub_1", "monthly", renewal, margin, now));
+        assertEquals("2026-12-01T00:00:00Z", FirestoreCreditsService.refreshShown("sub_1", "annual", renewal, "2026-12-01T00:00:00Z", now));
+        assertEquals(margin, FirestoreCreditsService.refreshShown(null, "monthly", renewal, margin, now));
+        assertEquals(margin, FirestoreCreditsService.refreshShown("sub_1", "monthly",
+                java.time.Instant.parse("2026-11-01T00:00:00Z").getEpochSecond(), margin, now));
+        assertEquals(null, FirestoreCreditsService.refreshShown("sub_1", "monthly", null, null, now));
+    }
 }
