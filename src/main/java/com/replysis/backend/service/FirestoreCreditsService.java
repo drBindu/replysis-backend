@@ -231,9 +231,9 @@ public class FirestoreCreditsService {
 
                 // Shares the credits reset date, so a user's month is one month
                 // rather than two that drift apart and confuse everybody.
-                long used = readLong(snap, "audioMinutesUsed");
                 Instant resetAt = readResetDate(snap);
-                if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
+                Long period = listeningPeriod(resetAt, snap.get(AUDIO_PERIOD_FIELD), Instant.now());
+                long used = period == null ? readLong(snap, "audioMinutesUsed") : 0;
 
                 // Bought interview minutes (India, Rs 5 a minute) are spent first; only what is left over
                 // counts toward the monthly guard, so paid minutes never eat a plan's allowance.
@@ -246,10 +246,14 @@ public class FirestoreCreditsService {
                 // against the speech providers' limits on sessions running at once.
                 // Zero-minute reads are balance checks, not listening, and must not
                 // stamp. One write per document: a transaction may not write it twice.
-                if (add > 0) tx.update(ref, Map.of("audioMinutesUsed", used,
-                                                   "minutesBalance", balance,
-                                                   "lastListeningAt", FieldValue.serverTimestamp()));
-                else tx.update(ref, "audioMinutesUsed", used);
+                Map<String, Object> listened = new java.util.HashMap<>();
+                listened.put("audioMinutesUsed", used);
+                if (add > 0) {
+                    listened.put("minutesBalance", balance);
+                    listened.put("lastListeningAt", FieldValue.serverTimestamp());
+                }
+                if (period != null) listened.put(AUDIO_PERIOD_FIELD, period);
+                tx.update(ref, listened);
 
                 boolean unlimited = isUnlimitedPlan(plan);
                 return new AudioUsage(safeInt(used), allowance, unlimited, plan, safeInt(balance));
@@ -277,14 +281,14 @@ public class FirestoreCreditsService {
 
             return db.runTransaction(tx -> {
                 DocumentSnapshot snap = tx.get(ref).get();
-                long used = snap.exists() ? readLong(snap, "audioMinutesUsed") : 0;
-
                 Instant resetAt = snap.exists() ? readResetDate(snap) : null;
-                if (resetAt != null && !Instant.now().isBefore(resetAt)) used = 0;
+                Long period = snap.exists() ? listeningPeriod(resetAt, snap.get(AUDIO_PERIOD_FIELD), Instant.now()) : null;
+                long used = snap.exists() && period == null ? readLong(snap, "audioMinutesUsed") : 0;
 
                 used += add;
                 Map<String, Object> fields = new java.util.HashMap<>();
                 fields.put("audioMinutesUsed", used);
+                if (period != null) fields.put(AUDIO_PERIOD_FIELD, period);
                 if (add > 0) fields.put("lastListeningAt", FieldValue.serverTimestamp());
                 if (snap.exists()) tx.update(ref, fields);
                 else {
@@ -868,6 +872,25 @@ public class FirestoreCreditsService {
     private static long readLong(DocumentSnapshot snap, String field) {
         Long value = snap.getLong(field);
         return value != null ? Math.max(0, value) : 0;
+    }
+
+    /**
+     * Which reset the listening counter was last zeroed for, as the reset date in epoch milliseconds. The website's
+     * app/api/usage/listening/route.ts writes the same field.
+     */
+    static final String AUDIO_PERIOD_FIELD = "audioMinutesPeriodMs";
+
+    /**
+     * When the month's reset date has passed but nothing has moved it yet (only an answer moves it), the counter is zeroed
+     * once for that date and then counts up again. Zeroing it on every report instead (bug round 50) let a person who only
+     * listens, and never asks for an answer, keep the counter at one report's minutes for as long as they liked, so the
+     * fair use guard never applied. Returns the reset date to record when the counter must be zeroed now, otherwise null.
+     */
+    static Long listeningPeriod(Instant resetAt, Object storedPeriod, Instant now) {
+        if (resetAt == null || now.isBefore(resetAt)) return null;
+        long period = resetAt.toEpochMilli();
+        if (storedPeriod instanceof Number n && n.longValue() == period) return null;
+        return period;
     }
 
     private static Instant readResetDate(DocumentSnapshot snap) {
