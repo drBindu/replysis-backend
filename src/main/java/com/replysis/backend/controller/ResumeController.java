@@ -118,6 +118,9 @@ public class ResumeController {
         }
     }
 
+    /** Free resume imports a day per account: far more than anyone uploading their own resume needs. */
+    static final int RESUME_IMPORTS_PER_DAY = 20;
+
     // ─── 1b. Import an existing resume ─────────────────────────────────────────
     // Free: it is how someone starts. Rate limited like every AI call.
     @PostMapping("/import")
@@ -129,8 +132,10 @@ public class ResumeController {
         if (user == null)
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Authentication required"));
         // Upload is free and people retry a file or try a second one, so it allows twice the usual AI rate.
+        // A day's ceiling as well (round 59): uncharged, it was otherwise up to 17,000 model calls a day per address.
         if (!(rateLimiter.tryAcquire("resume-import:ip:" + rateLimiter.clientIp(request), 12, 60_000L)
-                && rateLimiter.tryAcquire("resume-import:user:" + user.uid(), 6, 60_000L)))
+                && rateLimiter.tryAcquire("resume-import:user:" + user.uid(), 6, 60_000L)
+                && rateLimiter.tryAcquire("resume-import:day:" + user.uid(), RESUME_IMPORTS_PER_DAY, 24 * 60 * 60_000L)))
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", "Too many requests. Please try again shortly."));
         String text = boundedText(payload.get("text"), 30_000);
         if (text == null || text.isBlank() || text.trim().length() < 40)

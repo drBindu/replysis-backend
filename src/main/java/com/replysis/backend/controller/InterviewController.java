@@ -165,6 +165,10 @@ public class InterviewController {
     // A long interview also accumulates history, so the count must leave room.
     private static final int    MAX_MESSAGE_COUNT = 100;
     private static final int    MAX_MESSAGE_CHARS = 60_000;
+    // All messages together (round 59, 2026-11-07): 100 messages of 60,000 each let one request send six million
+    // characters to the model, billed even when the charge was then refused. A real request is a resume, its rules and
+    // a trimmed history, far under this.
+    static final int            MAX_TOTAL_MESSAGE_CHARS = 160_000;
     private static final int    MAX_IMAGE_BASE64_CHARS = 8_000_000;
     private static final int    PER_IDENTITY_PER_MINUTE = 12;
     private static final int    PER_IP_PER_MINUTE = 30;
@@ -451,6 +455,15 @@ public class InterviewController {
         // Prompt and completion tokens, filled in by the stream below.
         final long[] answerTokens = new long[3];   // prompt, completion, when the first words were sent
 
+        // Known to have nothing left (round 59): refused before any model call, from what is already remembered, so an
+        // account at zero cannot keep the model busy with answers that are thrown away. No extra lookup: a paying person's
+        // answer waits on nothing new.
+        if (!identity.isGuest() && knownOutOfAnswers(identity.uid())) {
+            return ResponseEntity.ok()
+                    .contentType(MediaType.TEXT_EVENT_STREAM)
+                    .body(out -> { out.write(NO_ANSWERS_LEFT_EVENT); out.flush(); });
+        }
+
         long chargeStart = System.currentTimeMillis();
         java.util.concurrent.CompletableFuture<Boolean> chargeTask =
                 java.util.concurrent.CompletableFuture.supplyAsync(com.replysis.backend.security.AppInfo.carriedTo(() ->
@@ -522,6 +535,7 @@ public class InterviewController {
                 long chargeMs = System.currentTimeMillis() - chargeStart;
                 if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
                 if (!charged) {
+                    if (chargeObserved && !identity.isGuest()) rememberOutOfAnswers(identity.uid());
                     // Same shape as every other failure on this stream, and
                     // no escaping to get wrong. A refused charge says so; only a charge that never answered is a fault.
                     outputStream.write((chargeObserved ? noAnswersLeftEvent() : friendlyErrorEvent()).getBytes());
@@ -1409,13 +1423,14 @@ public class InterviewController {
         return ResponseEntity.badRequest().build();
     }
 
-    private static List<Map<String, Object>> sanitizeMessages(Object rawMessages) {
+    static List<Map<String, Object>> sanitizeMessages(Object rawMessages) {
         if (rawMessages == null) return null;
         if (!(rawMessages instanceof List<?> messages) || messages.isEmpty() || messages.size() > MAX_MESSAGE_COUNT) {
             return null;
         }
 
         List<Map<String, Object>> sanitized = new ArrayList<>();
+        long total = 0;
         for (Object rawMessage : messages) {
             if (!(rawMessage instanceof Map<?, ?> message)) return null;
             Object rawRole = message.get("role");
@@ -1425,6 +1440,8 @@ public class InterviewController {
                     || content.isBlank() || content.length() > MAX_MESSAGE_CHARS) {
                 return null;
             }
+            total += content.length();
+            if (total > MAX_TOTAL_MESSAGE_CHARS) return null;
             sanitized.add(Map.of("role", role, "content", content.trim()));
         }
         return sanitized;
@@ -2358,8 +2375,28 @@ public class InterviewController {
         if (credits == null || credits.lookupFailed) return true;
         boolean allowed = canPayForScreenAnswer(credits, ANSWER_COST);
         if (readAheadAllowed.size() > 20_000) readAheadAllowed.clear();
-        readAheadAllowed.put(uid, new long[] { now + READ_AHEAD_CHECK_MS, allowed ? 1 : 0 });
+        readAheadAllowed.put(uid, new long[] { now + (allowed ? READ_AHEAD_CHECK_MS : OUT_OF_ANSWERS_MS), allowed ? 1 : 0 });
         return allowed;
+    }
+
+    // A charge refused for want of answers is remembered briefly, so the next press is refused before any model call.
+    // Short, because a purchase on the website does not reach this cache: a buyer waits at most this long.
+    static final long OUT_OF_ANSWERS_MS = 20_000L;
+    /** The same event noAnswersLeftEvent writes, for the refusal that happens before any stream is open. */
+    static final byte[] NO_ANSWERS_LEFT_EVENT =
+            "data: {\"error\":\"You have no answers left.\"}\n\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+    /** True when this account was refused for want of answers moments ago, or the read ahead found it cannot pay. */
+    boolean knownOutOfAnswers(String uid) {
+        if (uid == null) return false;
+        long[] known = readAheadAllowed.get(uid);
+        return known != null && known[1] == 0 && known[0] > System.currentTimeMillis();
+    }
+
+    void rememberOutOfAnswers(String uid) {
+        if (uid == null) return;
+        if (readAheadAllowed.size() > 20_000) readAheadAllowed.clear();
+        readAheadAllowed.put(uid, new long[] { System.currentTimeMillis() + OUT_OF_ANSWERS_MS, 0 });
     }
 
     /** True when the balance covers one screen answer: answers left, bought minutes, or an unlimited plan. */

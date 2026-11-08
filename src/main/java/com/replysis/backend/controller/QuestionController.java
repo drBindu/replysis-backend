@@ -133,8 +133,11 @@ public class QuestionController {
                     "This is not set up on this server yet. You were not charged.", false);
 
         UsageEventService.Context usage = UsageEventService.Context.of(action);
-        // With the Practice plan, the Maya add-on, or the one free interview, the mock interview uses no answers.
-        boolean included = mockIncluded(user.uid());
+        // With the Practice plan, the Maya add-on, or the one free interview, the mock interview uses no answers. A step the
+        // free interview pays for is counted, so the free interview has a size (round 59, TASTE_STEPS_MAX).
+        Map<String, Object> account = account(user.uid());
+        boolean included = account != null && mockIncludedFor(account, System.currentTimeMillis());
+        if (included && !planIncludesMock(account, System.currentTimeMillis())) countTasteStep(user.uid());
         if (!included && !creditsService.deductCredits(user.uid(), credits, usage))
             return fail(HttpStatus.PAYMENT_REQUIRED, "insufficient_credits",
                     "You do not have enough answers left for this.", false);
@@ -157,17 +160,30 @@ public class QuestionController {
         }
     }
 
-    /** Reads the person's account for {@link #mockIncludedFor}; a read failure means "charge as usual". */
-    private static boolean mockIncluded(String uid) {
+    /** Reads the person's account for {@link #mockIncludedFor}; null on a read failure, which means "charge as usual". */
+    private static Map<String, Object> account(String uid) {
         try {
-            Map<String, Object> d = com.google.firebase.cloud.FirestoreClient.getFirestore()
+            return com.google.firebase.cloud.FirestoreClient.getFirestore()
                     .collection("users").document(uid).get().get().getData();
-            return mockIncludedFor(d, System.currentTimeMillis());
         } catch (Exception e) {
             System.err.println("[QUESTIONS] could not read the plan, charging as usual: " + e.getClass().getSimpleName());
-            return false;
+            return null;
         }
     }
+
+    /** One step of the free interview used. Same field the website counts (app/lib/paid-plan.ts mayaTasteSteps). */
+    private static void countTasteStep(String uid) {
+        try {
+            com.google.firebase.cloud.FirestoreClient.getFirestore().collection("users").document(uid)
+                    .set(Map.of("mayaTasteSteps", com.google.cloud.firestore.FieldValue.increment(1)),
+                            com.google.cloud.firestore.SetOptions.merge());
+        } catch (Exception e) {
+            System.err.println("[QUESTIONS] could not count a free interview step: " + e.getClass().getSimpleName());
+        }
+    }
+
+    /** Free mock interview steps the one free interview may use; the website's TASTE_STEPS_MAX is the same number. */
+    static final int TASTE_STEPS_MAX = 30;
 
     /**
      * Whether the mock interview's own steps use no answers (owner, 2026-10-26). The same rule as the website's
@@ -177,16 +193,25 @@ public class QuestionController {
      */
     static boolean mockIncludedFor(Map<String, Object> d, long now) {
         if (d == null) return false;
+        if (planIncludesMock(d, now)) return true;
+        // The one free interview, within its own size (round 59): the phone never claims it, so without a limit an unused
+        // free interview gave questions, feedback and model answers for ever.
+        if (d.get("mayaTasteSteps") instanceof Number n && n.longValue() >= TASTE_STEPS_MAX) return false;
+        if (!Boolean.TRUE.equals(d.get("mayaFreeUsed"))) return true;
+        Object at = d.get("mayaFreeUsedAt");
+        return at instanceof com.google.cloud.Timestamp t && now - t.toDate().getTime() < 30 * 60_000L;
+    }
+
+    /** The mock interview is part of the plan: Practice, Max, the Maya add-on, or an internal account on a paid plan. */
+    static boolean planIncludesMock(Map<String, Object> d, long now) {
+        if (d == null) return false;
         if (Boolean.TRUE.equals(d.get("mockPlan")) || future(d.get("mockPlanUntil"), now)) return true;
         Object plan = d.get("plan");
         boolean paid = plan instanceof String p && !p.isBlank() && !"free".equalsIgnoreCase(p) && !"trial".equals(d.get("planSource"));
         // Max includes Maya (2026-10-27), as on the website (data/mayaAddon.ts MAX_INCLUDES_MAYA).
         if (paid && "max".equalsIgnoreCase((String) plan)) return true;
-        if (paid && (Boolean.TRUE.equals(d.get("internal")) || Boolean.TRUE.equals(d.get("mayaAddon"))
-                || future(d.get("mayaAddonUntil"), now))) return true;
-        if (!Boolean.TRUE.equals(d.get("mayaFreeUsed"))) return true;
-        Object at = d.get("mayaFreeUsedAt");
-        return at instanceof com.google.cloud.Timestamp t && now - t.toDate().getTime() < 30 * 60_000L;
+        return paid && (Boolean.TRUE.equals(d.get("internal")) || Boolean.TRUE.equals(d.get("mayaAddon"))
+                || future(d.get("mayaAddonUntil"), now));
     }
 
     /** Whether the Practice plan is running for this account (the apps show "Practice" instead of the free plan). */
