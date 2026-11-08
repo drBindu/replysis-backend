@@ -61,6 +61,23 @@ public class AlertService {
     /** How a finished message leaves. Replaced in tests. Returns true when it was handed to the mail service. */
     interface Sender { boolean send(String to, String subject, String body); }
 
+    /**
+     * Thrown by a Sender when it cannot tell whether the mail went (a timeout after the request was sent): the mail service
+     * may have accepted it. Such a send keeps its once-only claim, so nobody gets the same email twice (round 57).
+     */
+    static final class SendOutcomeUnknown extends RuntimeException {
+        SendOutcomeUnknown(String why) { super(why); }
+    }
+
+    /** TRUE sent, FALSE refused by the mail service, null when nobody can tell. */
+    private static Boolean trySend(Sender via, String recipient, String subject, String body) {
+        try {
+            return via.send(recipient, subject, body);
+        } catch (SendOutcomeUnknown unsure) {
+            return null;
+        }
+    }
+
     private Sender sender = this::sendByResend;
     /** How a customer email leaves (from the product's own address). Replaced in tests. */
     private Sender userSender = (recipient, subject, body) -> sendByResend(userFrom, recipient, subject, body);
@@ -171,10 +188,12 @@ public class AlertService {
                 System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + " (held: " + MAX_NOTICES_PER_HOUR + " notices this hour)");
                 return;
             }
-            boolean emailed = sender.send(to, subject, body);
-            System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : " (email failed)"));
-            // A failed send gives the claim back, so the next look tries again instead of the notice being lost.
-            if (!emailed) unclaim(key);
+            Boolean outcome = trySend(sender, to, subject, body);
+            boolean emailed = Boolean.TRUE.equals(outcome);
+            System.out.println("[ALERT] notice " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : outcome == null ? " (email outcome unknown)" : " (email failed)"));
+            // A refused send gives the claim back, so the next look tries again instead of the notice being lost. A send
+            // that may have gone through keeps it: trying again could email it twice (round 57).
+            if (Boolean.FALSE.equals(outcome)) unclaim(key);
             record(now, "notice", key, subject, emailed);
         });
     }
@@ -199,11 +218,12 @@ public class AlertService {
         long now = clock.getAsLong();
         run(() -> {
             if (!claimOnce(key, now)) return;
-            boolean sent = userSender.send(recipient, subject, body);
-            System.out.println("[MAIL] " + key + " to " + mask(recipient) + (sent ? " sent" : " failed"));
+            Boolean outcome = trySend(userSender, recipient, subject, body);
+            System.out.println("[MAIL] " + key + " to " + mask(recipient) + (Boolean.TRUE.equals(outcome) ? " sent" : outcome == null ? " outcome unknown" : " failed"));
             // A failed send gives the claim back, so the next look (a minute for the welcome, ten for a reminder) tries
             // again: kept, a short mail service hiccup lost that customer's welcome or trial reminder for good.
-            if (!sent) unclaim(key);
+            // A timeout keeps the claim: the mail service may have sent it, and the customer would get it twice (round 57).
+            if (Boolean.FALSE.equals(outcome)) unclaim(key);
         });
     }
 
@@ -213,8 +233,8 @@ public class AlertService {
         boolean configured = isConfigured();
         boolean emailed = false;
         if (configured && withinHourlyCap(now)) {
-            emailed = sender.send(to, "Replysis: test alert",
-                    "This is a test. If you can read this, alerts reach you.\n\nSent " + java.time.Instant.ofEpochMilli(now) + ".");
+            emailed = Boolean.TRUE.equals(trySend(sender, to, "Replysis: test alert",
+                    "This is a test. If you can read this, alerts reach you.\n\nSent " + java.time.Instant.ofEpochMilli(now) + "."));
         }
         record(now, "test", "test", "Replysis: test alert", emailed);
         Map<String, Object> out = new HashMap<>();
@@ -242,7 +262,7 @@ public class AlertService {
         } else if (!withinHourlyCap(now)) {
             System.out.println("[ALERT] " + kind + " " + key + ": " + maskEmails(subject) + " (not emailed: already sent " + MAX_EMAILS_PER_HOUR + " this hour)");
         } else {
-            emailed = sender.send(to, subject, body);
+            emailed = Boolean.TRUE.equals(trySend(sender, to, subject, body));
             System.out.println("[ALERT] " + kind + " " + key + ": " + maskEmails(subject) + (emailed ? " (emailed)" : " (email failed)"));
         }
         record(now, kind, key, subject, emailed);
@@ -347,9 +367,14 @@ public class AlertService {
             String said = reply.body() == null ? "" : reply.body();
             System.err.println("[ALERT] the mail service answered " + reply.statusCode() + ": " + (said.length() > 200 ? said.substring(0, 200) : said));
             return false;
-        } catch (Exception e) {
-            System.err.println("[ALERT] email failed: " + e.getMessage());
+        } catch (java.net.ConnectException | java.net.UnknownHostException | java.net.http.HttpConnectTimeoutException notSent) {
+            // The request never reached the mail service, so it was definitely not sent.
+            System.err.println("[ALERT] email failed: " + notSent.getMessage());
             return false;
+        } catch (Exception e) {
+            // A timeout or a dropped reply after the request went out: it may have been sent.
+            System.err.println("[ALERT] email outcome unknown: " + e.getMessage());
+            throw new SendOutcomeUnknown(String.valueOf(e.getMessage()));
         }
     }
 

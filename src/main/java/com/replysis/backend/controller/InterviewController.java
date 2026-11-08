@@ -2347,12 +2347,16 @@ public class InterviewController {
         long now = System.currentTimeMillis();
         long[] known = readAheadAllowed.get(uid);
         if (known != null && known[0] > now) return known[1] == 1;
-        boolean allowed;
+        com.replysis.backend.service.FirestoreCreditsService.UserCredits credits;
         try {
-            allowed = canPayForScreenAnswer(creditsService.getCredits(uid), ANSWER_COST);
+            credits = creditsService.getCredits(uid);
         } catch (Exception e) {
-            allowed = true;
+            credits = null;
         }
+        // getCredits never throws: a database fault comes back as a failed lookup. Allow it and do not remember it, so
+        // one hiccup never turns a paying person's faster screen answers off for a minute.
+        if (credits == null || credits.lookupFailed) return true;
+        boolean allowed = canPayForScreenAnswer(credits, ANSWER_COST);
         if (readAheadAllowed.size() > 20_000) readAheadAllowed.clear();
         readAheadAllowed.put(uid, new long[] { now + READ_AHEAD_CHECK_MS, allowed ? 1 : 0 });
         return allowed;
@@ -2360,7 +2364,7 @@ public class InterviewController {
 
     /** True when the balance covers one screen answer: answers left, bought minutes, or an unlimited plan. */
     static boolean canPayForScreenAnswer(com.replysis.backend.service.FirestoreCreditsService.UserCredits c, int cost) {
-        if (c == null) return true;
+        if (c == null || c.lookupFailed) return true;
         return c.isUnlimited || c.credits >= cost || c.minutesBalance > 0;
     }
 

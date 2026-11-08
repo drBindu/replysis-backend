@@ -418,7 +418,7 @@ public class FirestoreCreditsService {
             }).get();
         } catch (Exception e) {
             System.err.println("Firestore getCredits error: " + describe(e));
-            return new UserCredits(0, "free", false);
+            return UserCredits.failedLookup();
         }
     }
 
@@ -981,11 +981,27 @@ public class FirestoreCreditsService {
         }
 
         public UserCredits(int credits, String plan, boolean isUnlimited, int minutesBalance, String refreshesAt) {
+            this(credits, plan, isUnlimited, minutesBalance, refreshesAt, false);
+        }
+
+        /**
+         * True when the balance could not be read and this is the safe stand-in (0 answers, free). Callers that must not
+         * punish a paying person for a database fault, such as the screen read ahead, check it.
+         */
+        public final boolean lookupFailed;
+
+        private UserCredits(int credits, String plan, boolean isUnlimited, int minutesBalance, String refreshesAt, boolean lookupFailed) {
             this.credits = credits;
             this.plan = plan;
             this.isUnlimited = isUnlimited;
             this.minutesBalance = minutesBalance;
             this.refreshesAt = refreshesAt;
+            this.lookupFailed = lookupFailed;
+        }
+
+        /** The stand-in when the balance could not be read. */
+        public static UserCredits failedLookup() {
+            return new UserCredits(0, "free", false, 0, null, true);
         }
     }
 }

@@ -137,4 +137,23 @@ class AlertServiceTests {
         s.toUserOnce("welcome-u1", "someone@example.com", "Welcome to Replysis", "Hi");
         assertEquals(1, toCustomers.size(), "and never twice once it went out");
     }
+
+    @Test
+    void aSendThatMayHaveGoneThroughIsNeverTriedAgain() {
+        // A timeout after the request went out: the mail service may have sent it, so a second try could email it twice
+        // (round 57). Only a definite refusal gives the claim back.
+        int[] tries = {0};
+        AlertService s = AlertService.forTest((to, subject, body) -> true,
+                (to, subject, body) -> { tries[0]++; throw new AlertService.SendOutcomeUnknown("timed out"); }, now::get);
+        s.toUserOnce("welcome-u2", "someone@example.com", "Welcome to Replysis", "Hi");
+        s.toUserOnce("welcome-u2", "someone@example.com", "Welcome to Replysis", "Hi");
+        assertEquals(1, tries[0], "a send that may have gone through is not tried again");
+
+        int[] owner = {0};
+        AlertService n = AlertService.forTest((to, subject, body) -> { owner[0]++; throw new AlertService.SendOutcomeUnknown("timed out"); },
+                (to, subject, body) -> true, now::get);
+        n.notice("signup-u3", "New Replysis signup", "body");
+        n.notice("signup-u3", "New Replysis signup", "body");
+        assertEquals(1, owner[0], "nor is an owner notice");
+    }
 }

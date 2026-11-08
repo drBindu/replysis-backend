@@ -26,4 +26,14 @@ class ReadAheadBillingTests {
     void anUnknownBalanceNeverTakesTheFasterAnswerAway() {
         assertTrue(InterviewController.canPayForScreenAnswer(null, 5));
     }
+
+    @Test
+    void aFailedBalanceLookupAllowsIt() {
+        // getCredits answers a database fault with 0 answers on free; that must not look like an empty account (round 57).
+        UserCredits failed = UserCredits.failedLookup();
+        assertTrue(failed.lookupFailed);
+        assertTrue(failed.credits == 0 && "free".equals(failed.plan));
+        assertTrue(InterviewController.canPayForScreenAnswer(failed, 5));
+        assertFalse(new UserCredits(0, "free", false, 0).lookupFailed);
+    }
 }
