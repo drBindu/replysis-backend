@@ -727,7 +727,7 @@ public class InterviewController {
     // `read` is the screen read (stage one of a screen answer) started the moment the picture or the text arrived, so
     // by the time the question is asked it is usually finished and the answer starts straight from it. Exactly one of
     // base64 and text is normally present: text is what a slow connection sends instead of the picture.
-    private record StashedImage(String owner, String base64, String text, long expiresAt,
+    record StashedImage(String owner, String base64, String text, long expiresAt,
                                 java.util.concurrent.CompletableFuture<String> read) {
         long size() {
             return (base64 == null ? 0 : base64.length()) + (text == null ? 0 : text.length());
@@ -1049,10 +1049,27 @@ public class InterviewController {
         final boolean[] nothingAsked = new boolean[1];
         final boolean[] screenClientLeft = {false};   // the person went away before the answer reached them
 
+        // Known to have nothing left: refused before any model call, from what is already remembered (as /ask does).
+        if (!identity.isGuest() && knownOutOfAnswers(identity.uid()))
+            return ResponseEntity.status(402).build();
+
+        // The screen read and the picture answer start now, beside the charge, as a spoken answer's model call does: the
+        // charge took about 0.1 to 0.15 s that the person spent waiting before either began (2026-11-08). Nothing reaches
+        // the person until the charge has gone through; a refused charge closes both.
+        final long readStart = System.currentTimeMillis();
+        final java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> earlyVisionTask =
+                startPictureAnswerEarly(textMode, looksLikeCoding(finalPrompt), takenEntries)
+                        ? startEarlyVision(endpoint, apiKey, model, fallbackEndpoint, fallbackApiKey, fallbackModel,
+                                           buildVisionMessages(finalImages, finalPrompt))
+                        : null;
+        final java.util.concurrent.CompletableFuture<String> readTask = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> obtainScreenRead(textMode, screenWords, endpoint, apiKey, model, finalImages, finalPrompt, takenEntries),
+                com.replysis.backend.service.HedgedCall.pool());
+
         // Charge UP FRONT (atomic) — same contract as /ask: no unpaid answers,
         // and a refund below if every vision provider fails.
         // Timed because the client counts this as "the AI thinking".
-        long chargeStart = System.currentTimeMillis();
+        long chargeStart = readStart;
         boolean charged = identity.isGuest()
                 ? creditsService.deductGuestCredits(identity.deviceId(), ANSWER_COST, screenUsage)
                 : creditsService.deductCredits(identity.uid(), ANSWER_COST, screenUsage);
@@ -1060,6 +1077,9 @@ public class InterviewController {
         if (chargeMs > 250) System.out.println("[SLOW] credit deduction " + chargeMs + "ms");
         System.out.println("[SCREEN_TIME] charge=" + chargeMs + "ms mode=" + (textMode ? "text" : "picture"));
         if (!charged) {
+            if (earlyVisionTask != null) discardEarlyVision(earlyVisionTask);
+            // Remembered as /ask does, so the next press is refused before any model call.
+            if (!identity.isGuest()) rememberOutOfAnswers(identity.uid());
             return ResponseEntity.status(402).build(); // Payment Required
         }
 
@@ -1070,7 +1090,7 @@ public class InterviewController {
                     companionApp == null ? null : companionApp.platform(), companionQuestion, "screen", rawOut);
             boolean providerAccepted = false;
             boolean answerDelivered = false;
-            java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> earlyVision = null;
+            final java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> earlyVision = earlyVisionTask;
             boolean earlyVisionUsed = false;
             try {
                 // Reading the screen and writing the code are different jobs.
@@ -1092,29 +1112,22 @@ public class InterviewController {
                 // stages draw on separate allowances rather than racing each
                 // other for one.
                 String screenRead;
-                final long answerStart = System.currentTimeMillis();
-                // The picture answer is started beside the screen read instead of after it. On a screen with no coding
-                // problem the read only says so and is thrown away, and the picture answer started after it (measured
-                // 2026-11-07: 1.4 to 3 s of read, then the answer). Now both run at once; whichever path the read picks,
-                // the other call is closed. A read finished ahead of the question needs no such start.
-                if (!textMode && looksLikeCoding(finalPrompt) && !preReadDone(takenEntries)) {
-                    final List<Map<String, Object>> early = buildVisionMessages(finalImages, finalPrompt);
-                    earlyVision = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                        try {
-                            return raceVision(endpoint, apiKey, model, fallbackEndpoint, fallbackApiKey, fallbackModel, early);
-                        } catch (Exception e) {
-                            throw new java.util.concurrent.CompletionException(e);
-                        }
-                    }, com.replysis.backend.service.HedgedCall.pool());
-                }
+                final long answerStart = readStart;
+                // The picture answer is started beside the screen read instead of after it (both started before the
+                // charge, above). On a screen with no coding problem the read only says so, and now stops at that
+                // verdict (collectRead); whichever path the read picks, the other call is closed. A read finished ahead
+                // of the question needs no such start.
                 try {
-                    screenRead = obtainScreenRead(textMode, screenWords, endpoint, apiKey, model,
-                            finalImages, finalPrompt, takenEntries);
-                } catch (RateLimitedException limited) {
-                    outputStream.write(rateLimitedEvent(limited.response).getBytes());
-                    outputStream.flush();
-                    return;
+                    screenRead = readTask.join();
+                } catch (java.util.concurrent.CompletionException failed) {
+                    if (failed.getCause() instanceof RateLimitedException limited) {
+                        outputStream.write(rateLimitedEvent(limited.response).getBytes());
+                        outputStream.flush();
+                        return;
+                    }
+                    screenRead = null;   // the read failed: answer from the picture, as when it returns nothing
                 }
+                System.out.println("[SCREEN_TIME] decided after " + (System.currentTimeMillis() - readStart) + "ms");
 
                 // "none: not a coding screen" is stage one correctly reporting
                 // there was nothing to extract — the screen was a browser tab,
@@ -2083,6 +2096,43 @@ public class InterviewController {
         return readScreen(endpoint, apiKey, model, images, actuallyAsked(prompt));
     }
 
+    static final String NOT_CODING_MARKER = "none: not a coding screen";
+    /** The verdict is the first thing under PROBLEM, so it is only looked for in the opening characters. */
+    static final int VERDICT_WINDOW_CHARS = 400;
+
+    /**
+     * Reads a streamed screen read, and stops as soon as it says there is no coding problem on the screen.
+     *
+     * That verdict is the first line of the read, and on an ordinary screen it is the only part ever used: the read was
+     * otherwise streamed to the end (a description of the screen nobody reads), 1.4 to 3 s, while the answer that was
+     * already started beside it waited for the decision (measured 2026-11-08: read 1904 ms, first words 2074 ms).
+     * Stopping at the verdict decides at the read's first words instead. Closing the body ends the model's stream.
+     */
+    static String collectRead(java.io.InputStream body,
+                              java.util.function.Function<String, String> token) throws java.io.IOException {
+        var text = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(body, java.nio.charset.StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data: ")) continue;
+                String t = token.apply(line);
+                if (t != null) text.append(t);
+                if (text.length() <= VERDICT_WINDOW_CHARS + 200 && saysNotCoding(text)) break;
+                if (text.length() > 8_000) break;
+            }
+        }
+        return text.toString().trim();
+    }
+
+    /** True when the opening of a screen read already says the screen holds no coding problem. */
+    static boolean saysNotCoding(CharSequence soFar) {
+        if (soFar == null) return false;
+        String head = soFar.length() > VERDICT_WINDOW_CHARS + 200
+                ? soFar.subSequence(0, VERDICT_WINDOW_CHARS + 200).toString() : soFar.toString();
+        return head.toLowerCase(java.util.Locale.ROOT).contains(NOT_CODING_MARKER);
+    }
+
     /** The screen read itself. Takes the interviewer's words as a parameter so it can run before they are spoken. */
     private String readScreen(String endpoint, String apiKey, String model,
                               List<String> images, String asked) {
@@ -2117,25 +2167,10 @@ public class InterviewController {
                 return null;
             }
 
-            var text = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(res.body(), java.nio.charset.StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!line.startsWith("data: ")) continue;
-                    // contentToken strips the "data: " prefix itself (same as
-                    // its only other caller, streamUnlessRefused, which passes
-                    // the raw line). This used to strip it again before the
-                    // call, corrupting the JSON on every line and making this
-                    // whole two-stage read-then-code pipeline silently return
-                    // "" forever — every request fell through to the weaker
-                    // single-stage path without ever failing loudly.
-                    String token = contentToken(line);
-                    if (token != null) text.append(token);
-                    if (text.length() > 8_000) break;
-                }
-            }
-            String raw = text.toString().trim();
+            // contentToken strips the "data: " prefix itself (same as its only other caller, streamUnlessRefused, which
+            // passes the raw line). This used to strip it again before the call, corrupting the JSON on every line and
+            // making this whole two-stage read-then-code pipeline silently return "" forever.
+            String raw = collectRead(res.body(), this::contentToken);
             String fixed = fixPointerSignatureIfNeeded(raw);
 
             // Diagnostic, deliberately loud, added after three fixes for the
@@ -2438,6 +2473,33 @@ public class InterviewController {
         return text != null && !text.isBlank();
     }
 
+    /**
+     * Whether the picture answer should start at once, beside the charge and the read, instead of after them. It is
+     * wanted whenever the answer may come from the picture: no read at all (the question is not about code), a read still
+     * to come, or a read done ahead that already said there is no coding problem. Only a read done ahead that found a
+     * coding problem goes to the coding model for certain, so only then is the picture answer not started.
+     */
+    static boolean startPictureAnswerEarly(boolean textMode, boolean codingQuestion, List<StashedImage> taken) {
+        if (textMode) return false;
+        if (!codingQuestion) return true;
+        if (!preReadDone(taken)) return true;
+        return saysNotCoding(taken.get(0).read().getNow(null));
+    }
+
+    /** The picture answer started beside the screen read; a failure to start surfaces when it is joined. */
+    private java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> startEarlyVision(
+            String endpoint, String apiKey, String model,
+            String fallbackEndpoint, String fallbackApiKey, String fallbackModel,
+            List<Map<String, Object>> messages) {
+        return java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try {
+                return raceVision(endpoint, apiKey, model, fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+            } catch (Exception e) {
+                throw new java.util.concurrent.CompletionException(e);
+            }
+        }, com.replysis.backend.service.HedgedCall.pool());
+    }
+
     /** Closes a picture answer started early and then not used, whenever it arrives. */
     static void discardEarlyVision(java.util.concurrent.CompletableFuture<HttpResponse<java.io.InputStream>> early) {
         early.thenAccept(InterviewController::closeQuietly);
@@ -2502,18 +2564,7 @@ public class InterviewController {
                 return null;
             }
 
-            var text = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(res.body(), java.nio.charset.StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!line.startsWith("data: ")) continue;
-                    String token = contentToken(line);
-                    if (token != null) text.append(token);
-                    if (text.length() > 8_000) break;
-                }
-            }
-            String raw = text.toString().trim();
+            String raw = collectRead(res.body(), this::contentToken);
             System.out.println("[SCREEN_READ] text chars=" + raw.length());
             return raw.isEmpty() ? null : fixPointerSignatureIfNeeded(raw);
         } catch (Exception e) {
