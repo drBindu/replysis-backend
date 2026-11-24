@@ -2563,12 +2563,8 @@ public class InterviewController {
             String extract = SCREEN_TEXT_PREAMBLE + SCREEN_READ_TEMPLATE.formatted(asked)
                     + "\n\nTHE SCREEN TEXT:\n" + screenWords;
 
-            boolean onCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
-            HttpResponse<java.io.InputStream> res = callAiProvider(
-                    onCerebras ? CEREBRAS_ENDPOINT : GEMINI_ENDPOINT,
-                    onCerebras ? cerebrasApiKey : geminiApiKey,
-                    onCerebras ? ANSWER_MODEL_CEREBRAS : VISION_MODEL_GEMINI,
-                    List.of(Map.of("role", "user", "content", extract)), CODING_STAGE_MAX_TOKENS);
+            HttpResponse<java.io.InputStream> res = callTextModelWithBackup(
+                    List.of(Map.of("role", "user", "content", extract)), "screen text read");
             if (res.statusCode() != 200) {
                 System.err.println("Screen text read failed: HTTP " + res.statusCode());
                 return null;
@@ -2585,17 +2581,36 @@ public class InterviewController {
 
     /** The whole answer from words alone, for a question that is not a coding problem (or when the read failed). */
     private HttpResponse<java.io.InputStream> callTextScreenAnswer(String screenWords, String prompt) throws Exception {
-        boolean onCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
         String content = prompt
                 + "\n\nThe screen could not be sent as a picture, so this is its text, read by a program that reads "
                 + "text from a picture. It can contain small errors, and the lines of panels that sit side by side "
                 + "can be mixed together. Answer from it as if you were looking at the screen. Never mention that "
                 + "this is text or that anything was read to you.\n\n" + screenWords;
-        return callAiProvider(
-                onCerebras ? CEREBRAS_ENDPOINT : GEMINI_ENDPOINT,
-                onCerebras ? cerebrasApiKey : geminiApiKey,
-                onCerebras ? ANSWER_MODEL_CEREBRAS : ANSWER_MODEL_GEMINI,
-                List.of(Map.of("role", "user", "content", content)), CODING_STAGE_MAX_TOKENS);
+        return callTextModelWithBackup(List.of(Map.of("role", "user", "content", content)), "text screen answer");
+    }
+
+    /**
+     * Cerebras first, Gemini when Cerebras refuses. Both screen-from-words paths were Cerebras only: from 18 to 24 Nov 2026
+     * the Cerebras balance was empty (HTTP 402) and every read ahead from words came back empty (119 in a row) while the
+     * spoken answers, which have a backup, carried on. A refusal arrives in tens of milliseconds, so trying Gemini after it
+     * costs almost nothing; a refused body is drained so the connection is reused.
+     */
+    private HttpResponse<java.io.InputStream> callTextModelWithBackup(List<?> messages, String what) throws Exception {
+        boolean haveCerebras = cerebrasApiKey != null && !cerebrasApiKey.isBlank();
+        boolean haveGemini = geminiApiKey != null && !geminiApiKey.isBlank();
+        if (haveCerebras) {
+            try {
+                HttpResponse<java.io.InputStream> res = callAiProvider(CEREBRAS_ENDPOINT, cerebrasApiKey,
+                        ANSWER_MODEL_CEREBRAS, messages, CODING_STAGE_MAX_TOKENS);
+                if (res.statusCode() == 200 || !haveGemini) return res;
+                System.err.println(what + ": Cerebras HTTP " + res.statusCode() + ", trying Gemini");
+                try (var body = res.body()) { body.transferTo(java.io.OutputStream.nullOutputStream()); } catch (Exception ignored) { }
+            } catch (Exception e) {
+                if (!haveGemini) throw e;
+                System.err.println(what + ": Cerebras error " + e.getClass().getSimpleName() + ", trying Gemini");
+            }
+        }
+        return callAiProvider(GEMINI_ENDPOINT, geminiApiKey, ANSWER_MODEL_GEMINI, messages, CODING_STAGE_MAX_TOKENS);
     }
 
     // A whole function-signature line: return type, name, parameter list.
