@@ -1797,6 +1797,9 @@ public class InterviewController {
         // Ended before the probe filled, so nothing has been written yet.
         if (!released) {
             if (looksLikeRefusal(opening.toString())) return false;
+            // An empty answer (no words at all) writes nothing, not even its [DONE]: a retry streams after this, and the
+            // app stops reading at the first [DONE], so the retry's real answer was charged and never shown (2026-11-24).
+            if (!delivered) return false;
             if (nothingAskedOut != null && nothingAskedOut.length > 0 && opensWithNothingAsked(opening.toString()))
                 nothingAskedOut[0] = true;
             for (String h : held) outputStream.write((h + "\n\n").getBytes());
