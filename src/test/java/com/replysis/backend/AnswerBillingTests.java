@@ -54,8 +54,9 @@ class AnswerBillingTests {
             verify(credits, never()).refundGuestCredits(anyString(), anyInt(), any(), anyBoolean());
         }
         verify(credits, times(1)).deductGuestCredits(eq("test-device"), anyInt(), any());
+        // First model, plain-words retry on it, then the other model in plain words: three tries, one charge, one refund.
         if (allowed && "".equals(responseBody))
-            verify(http, times(2)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+            verify(http, times(3)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
     }
 
     @Test void providerFailureAfterSlowChargeRefundsExactlyOnce() throws Exception { exercise(true, null); }
