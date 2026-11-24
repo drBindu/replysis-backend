@@ -585,11 +585,16 @@ public class InterviewController {
                 // Second try: the other Groq model, which has its own token
                 // budget. Same messages, so the answer is built from identical
                 // context either way.
+                // Which model this answer is actually coming from. The plain-words retry below goes to the same one:
+                // it used to go to the first model even after that one had refused, so on 22 Nov 2026 (first model out
+                // of credit) a declined backup answer was retried on the refusing model and the person got no answer.
+                boolean onBackup = false;
                 if (response.statusCode() != 200 && fallbackApiKey != null && !fallbackApiKey.isBlank()) {
                     System.err.println("Provider " + provider + " returned HTTP " + response.statusCode()
                             + ", falling back to " + fallbackProvider + "/" + fallbackModel);
                     try { response.body().close(); } catch (Exception ignored) { /* already closed */ }
                     response = callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, messages);
+                    onBackup = true;
                 }
 
                 if (response.statusCode() != 200) {
@@ -614,10 +619,26 @@ public class InterviewController {
 
                 if (!answerDelivered) {
                     System.out.println("[AI] Model declined; asking again in plainer words.");
-                    HttpResponse<java.io.InputStream> retry =
-                            callAiProvider(endpoint, apiKey, model, plainRetryMessages(aiMessages));
+                    var plain = plainRetryMessages(aiMessages);
+                    HttpResponse<java.io.InputStream> retry = onBackup
+                            ? callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, plain)
+                            : callAiProvider(endpoint, apiKey, model, plain);
                     if (retry.statusCode() == 200)
                         answerDelivered = streamUnlessRefused(retry, outputStream, answerTokens);
+                    else
+                        try { retry.body().close(); } catch (Exception ignored) { /* already closed */ }
+                    // Still nothing: the other model, in plain words, before giving up and refunding.
+                    boolean haveBackup = fallbackApiKey != null && !fallbackApiKey.isBlank();
+                    if (!answerDelivered && (onBackup || haveBackup)) {
+                        System.out.println("[AI] Still no answer; trying the " + (onBackup ? "first" : "backup") + " model.");
+                        HttpResponse<java.io.InputStream> other = onBackup
+                                ? callAiProvider(endpoint, apiKey, model, plain)
+                                : callAiProvider(fallbackEndpoint, fallbackApiKey, fallbackModel, plain);
+                        if (other.statusCode() == 200)
+                            answerDelivered = streamUnlessRefused(other, outputStream, answerTokens);
+                        else
+                            try { other.body().close(); } catch (Exception ignored) { /* already closed */ }
+                    }
                 }
             } catch (Exception e) {
                 clientLeft[0] = clientLeft(e);
