@@ -2471,9 +2471,43 @@ public class InterviewController {
                 com.replysis.backend.service.HedgedCall.pool());
     }
 
-    /** True when the one screen sent ahead has already been read, so the read for this question costs nothing. */
+    /** True when every screen view sent ahead has already been read, so the read for this question costs nothing. */
     private static boolean preReadDone(List<StashedImage> taken) {
-        return taken != null && taken.size() == 1 && readReady(taken.get(0).read());
+        if (taken == null || taken.isEmpty()) return false;
+        for (StashedImage s : taken) if (!readReady(s.read())) return false;
+        return true;
+    }
+
+    /**
+     * The reads started ahead for every view this question carries, joined oldest first, or null when any of them is
+     * missing, failed or still running at the deadline. A scrolled page arrives as up to three views; only a single view
+     * used to reuse its read, so the common scrolled case read every picture again at question time (0.9 to 2 s, every
+     * coding screen question from 19 to 22 Nov 2026 logged read=now).
+     */
+    static String waitForReadsAhead(List<StashedImage> taken, long deadlineMs) {
+        if (taken == null || taken.isEmpty()) return null;
+        var reads = new java.util.ArrayList<String>(taken.size());
+        for (StashedImage s : taken) {
+            var f = s.read();
+            if (f == null) return null;
+            long left = deadlineMs - System.currentTimeMillis();
+            if (left <= 0 && !f.isDone()) return null;
+            try {
+                String r = f.get(Math.max(0, left), java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (r == null || r.isBlank()) return null;
+                reads.add(r);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception timedOutOrFailed) {
+                return null;
+            }
+        }
+        if (reads.size() == 1) return reads.get(0);
+        // A view that found no coding problem (the top of a page, a blank editor) says so in words that would otherwise be
+        // joined into the problem. Leave those out; only when no view found a problem is the verdict "not coding".
+        var coding = reads.stream().filter(r -> !saysNotCoding(r)).toList();
+        return coding.isEmpty() ? reads.get(reads.size() - 1) : joinScreenTexts(coding);
     }
 
     /** A screen read that has finished with something in it. */
@@ -2493,7 +2527,7 @@ public class InterviewController {
         if (textMode) return false;
         if (!codingQuestion) return true;
         if (!preReadDone(taken)) return true;
-        return saysNotCoding(taken.get(0).read().getNow(null));
+        return saysNotCoding(waitForReadsAhead(taken, 0));
     }
 
     /** The picture answer started beside the screen read; a failure to start surfaces when it is joined. */
@@ -2525,19 +2559,11 @@ public class InterviewController {
         if (!looksLikeCoding(prompt)) return null;
 
         long t0 = System.currentTimeMillis();
-        var preRead = taken.size() == 1 ? taken.get(0).read() : null;
-        if (preRead != null) {
-            try {
-                String ready = preRead.get(PREREAD_MAX_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
-                if (ready != null && !ready.isBlank()) {
-                    System.out.println("[SCREEN_TIME] read=ahead waited=" + (System.currentTimeMillis() - t0) + "ms");
-                    return ready;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception ignored) {
-                // Timed out or failed: read it now.
-            }
+        String ahead = waitForReadsAhead(taken, t0 + PREREAD_MAX_WAIT_MS);
+        if (ahead != null) {
+            System.out.println("[SCREEN_TIME] read=ahead views=" + taken.size()
+                    + " waited=" + (System.currentTimeMillis() - t0) + "ms");
+            return ahead;
         }
 
         String asked = actuallyAsked(prompt);

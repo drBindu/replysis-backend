@@ -98,6 +98,24 @@ class ScreenReadVerdictTests {
         assertFalse(InterviewController.saysNotCoding(coding));
     }
 
+    @Test
+    void aScrolledPageReusesEveryViewsReadAhead() {
+        var views = java.util.List.of(stashed("KIND: none: not a coding screen, a blank editor"),
+                stashed("PROBLEM: Two Sum\nGiven nums"), stashed("Given nums\nCONSTRAINTS: n <= 10^4"));
+        String joined = InterviewController.waitForReadsAhead(views, System.currentTimeMillis() + 100);
+        assertTrue(joined != null && joined.contains("Two Sum") && joined.contains("CONSTRAINTS"), "both coding views joined");
+        assertFalse(InterviewController.saysNotCoding(joined), "a blank view does not turn a coding page into not coding");
+        assertFalse(InterviewController.startPictureAnswerEarly(false, true, views), "three ready views found code");
+
+        var allBlank = java.util.List.of(stashed("KIND: none: not a coding screen"), stashed("KIND: none: not a coding screen, a slide"));
+        assertTrue(InterviewController.saysNotCoding(InterviewController.waitForReadsAhead(allBlank, System.currentTimeMillis())));
+
+        var oneMissing = java.util.List.of(stashed("PROBLEM: Two Sum"),
+                new InterviewController.StashedImage("u", "x", null, Long.MAX_VALUE, new java.util.concurrent.CompletableFuture<>()));
+        assertTrue(InterviewController.waitForReadsAhead(oneMissing, System.currentTimeMillis() + 50) == null, "a view still reading at the deadline means read now");
+        assertTrue(InterviewController.startPictureAnswerEarly(false, true, oneMissing), "not all ready: picture answer starts");
+    }
+
     private static InterviewController.StashedImage stashed(String read) {
         return new InterviewController.StashedImage("u", "x", null, Long.MAX_VALUE,
                 java.util.concurrent.CompletableFuture.completedFuture(read));
